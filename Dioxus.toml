@@ -1,0 +1,5 @@
+[application]
+name = "mtab-lite"
+
+[web.app]
+title = "mtab-lite | 书签导航"

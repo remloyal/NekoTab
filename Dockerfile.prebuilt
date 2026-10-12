@@ -1,0 +1,41 @@
+# 运行镜像（预打包产物版）：镜像内不含 Rust 工具链，只拷贝已经构建好的产物。
+# 已在 WSL(Ubuntu 24.04) 上用原生 dx 构建的产物实测通过：构建 → 打包 → 容器运行 → HTTP 200。
+# 适合「本地/CI 编译一次，部署时秒构建」的场景，但不自带可复现性。
+#
+# 用法（产物必须来自 Linux，见下方说明）：
+#   1) 在 Linux 环境里构建（WSL / CI / rust 容器均可，需要 rustc >= 1.94）：
+#        dx build --release --platform web
+#        产物目录：target/dx/mtab-lite/release/web/（内含 server 与 public/）
+#        若用 `dx bundle --web --release`，产物在 bundle 目录，路径以 dx 实际输出为准，
+#        同样把「含 server 与 public/ 的那一层」作为构建上下文即可。
+#   2) 以该产物目录为上下文打运行镜像：
+#        docker build -f Dockerfile.prebuilt -t mtab-lite:prebuilt \
+#          target/dx/mtab-lite/release/web
+#
+# 两个注意点：
+#   * 不要用 Windows 上编出的产物。Windows 下 dx 产出的服务端是 server-*.exe
+#     （PE 可执行文件），Linux 容器无法运行。产物必须是 Linux 构建的。
+#   * glibc 一般不是问题：rustc 面向 x86_64-unknown-linux-gnu 的基线是 glibc 2.17，
+#     实测在 Ubuntu 24.04（glibc 2.39）构建的产物可直接跑在 debian:bookworm-slim
+#     （glibc 2.36）里。但若改用 musl 等其他 libc，或引入了依赖系统库的 C 组件，
+#     需自行确认运行环境是否满足。
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 上下文即产物目录：server 与 public/ 会被拷到 /app 下同级。
+COPY . /app/
+
+# 变量名是 IP 不是 HOST（由 dioxus-cli-config 读取）。
+ENV DATABASE_URL="sqlite:///data/mtab.db?mode=rwc" \
+    IP=0.0.0.0 \
+    PORT=8080
+
+VOLUME /data
+EXPOSE 8080
+
+CMD ["/app/server"]

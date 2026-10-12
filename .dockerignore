@@ -1,0 +1,16 @@
+# 构建上下文排除项。
+# 本地 target/ 会膨胀到 10G+，若不打进 .dockerignore，`COPY . .` 会把它
+# 整个塞进构建上下文，导致构建卡死或镜像巨大。
+target/
+dist/
+data/
+.git/
+.gitignore
+.env
+*.db
+*.db-shm
+*.db-wal
+Dockerfile
+.dockerignore
+README.md
+REQUIREMENTS.md

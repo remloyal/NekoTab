@@ -1,0 +1,1101 @@
+:root {
+    --accent: #5b9dff;
+    --accent-soft: rgba(91, 157, 255, 0.16);
+    --danger: #ff6b6b;
+    --text: #eef1f6;
+    --text-dim: #97a1b0;
+    --border: #2b3242;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+}
+
+body {
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    /* 壁纸：纯 CSS 多层渐变，自包含、离线可用 */
+    background:
+        radial-gradient(1200px 800px at 12% 8%, #3a2f5c 0%, transparent 58%),
+        radial-gradient(1000px 720px at 88% 16%, #1e4a5c 0%, transparent 58%),
+        radial-gradient(900px 900px at 50% 108%, #4a3450 0%, transparent 62%),
+        linear-gradient(165deg, #0b0d13 0%, #131620 48%, #090b10 100%);
+    background-attachment: fixed;
+}
+
+.stage-root {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: clamp(46px, 9vh, 112px) 24px 72px;
+}
+
+/* ---------- 时钟 ---------- */
+.clock {
+    text-align: center;
+    margin-bottom: 8px;
+}
+
+.clock-time {
+    min-height: 1.05em;
+    font-size: clamp(42px, 7.5vw, 74px);
+    font-weight: 200;
+    letter-spacing: 2px;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 6px 34px rgba(0, 0, 0, 0.55);
+}
+
+.clock-date {
+    min-height: 1.4em;
+    margin-top: 8px;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+    color: rgba(238, 241, 246, 0.72);
+}
+
+/* ---------- 一言 ---------- */
+.quote {
+    max-width: min(660px, 100%);
+    min-height: 1.6em;
+    margin: 4px 0 22px;
+    font-size: 13.5px;
+    line-height: 1.6;
+    text-align: center;
+    color: rgba(238, 241, 246, 0.62);
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+}
+
+.quote-text {
+    word-break: break-word;
+}
+
+.quote-source {
+    margin-left: 8px;
+    color: rgba(238, 241, 246, 0.4);
+}
+
+/* ---------- 搜索（含搜索引擎选择） ---------- */
+.search-form {
+    width: min(680px, 100%);
+    margin-bottom: 34px;
+}
+
+.search-box {
+    position: relative;
+    z-index: 41;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 8px 6px 6px;
+    background: rgba(255, 255, 255, 0.09);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    backdrop-filter: blur(10px);
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.search-box:focus-within {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.engine {
+    position: relative;
+    flex: 0 0 auto;
+}
+
+.engine-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px;
+    background: none;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.engine-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.engine-caret {
+    font-size: 10px;
+    color: rgba(238, 241, 246, 0.55);
+}
+
+.engine-logo {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.engine-logo-gear {
+    font-weight: 400;
+    color: rgba(238, 241, 246, 0.8);
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.engine-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+}
+
+.engine-menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 8px);
+    z-index: 42;
+    min-width: 176px;
+    padding: 6px;
+    background: rgba(24, 28, 38, 0.98);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(12px);
+}
+
+.engine-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 13.5px;
+    color: var(--text);
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+
+.engine-item:hover,
+.engine-item.active {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.engine-item .engine-logo {
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+}
+
+.engine-name {
+    flex: 1;
+}
+
+.engine-check {
+    font-size: 13px;
+    color: var(--accent);
+}
+
+.engine-sep {
+    height: 1px;
+    margin: 5px 8px;
+    background: var(--border);
+}
+
+.search {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 10px 12px;
+    font-size: 15px;
+    color: var(--text);
+    background: none;
+    border: none;
+    outline: none;
+}
+
+.search::placeholder {
+    color: rgba(238, 241, 246, 0.42);
+}
+
+.search-go {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    font-size: 17px;
+    color: rgba(238, 241, 246, 0.6);
+    background: none;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.search-go:hover:not(:disabled) {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.search-go:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* ---------- 主体 ---------- */
+.stage {
+    width: 100%;
+    max-width: 940px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+/* ---------- 分类标签页 ---------- */
+.tabs {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+    margin-bottom: 30px;
+}
+
+.tab {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 13.5px;
+    color: rgba(238, 241, 246, 0.66);
+    background: none;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+}
+
+.tab-count {
+    font-size: 11px;
+    line-height: 1;
+    color: rgba(238, 241, 246, 0.38);
+}
+
+.tab.active .tab-count {
+    color: rgba(238, 241, 246, 0.6);
+}
+
+.tab:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.tab.active {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.tab.active::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: 0;
+    transform: translateX(-50%);
+    width: 22px;
+    height: 2.5px;
+    border-radius: 2px;
+    background: var(--accent);
+}
+
+/* ---------- 图标网格 ---------- */
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, 96px);
+    justify-content: center;
+    gap: 20px 8px;
+    width: 100%;
+}
+
+.tile {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 9px;
+    padding: 10px 4px;
+    color: var(--text);
+    text-decoration: none;
+    background: none;
+    border: none;
+    border-radius: 14px;
+    cursor: pointer;
+    font: inherit;
+    transition: background 0.15s, transform 0.15s;
+}
+
+.tile:hover {
+    background: rgba(255, 255, 255, 0.07);
+    transform: translateY(-2px);
+}
+
+/* ---------- 卡片编辑态 ---------- */
+.grid.editing .tile {
+    outline: 1px dashed rgba(255, 255, 255, 0.18);
+    outline-offset: -2px;
+}
+
+.grid.editing .tile:hover {
+    transform: none;
+}
+
+.tile[draggable="true"] {
+    cursor: grab;
+}
+
+.tile[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+.tile.drag-over {
+    background: var(--accent-soft);
+    outline: 1px dashed var(--accent);
+    outline-offset: -2px;
+}
+
+.tile-del {
+    position: absolute;
+    top: 2px;
+    right: 8px;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    font-size: 11px;
+    line-height: 1;
+    color: #fff;
+    background: var(--danger);
+    border-radius: 50%;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+    transition: filter 0.12s;
+}
+
+.tile-del:hover {
+    filter: brightness(1.12);
+}
+
+.tile-grip {
+    position: absolute;
+    right: 12px;
+    bottom: 24px;
+    z-index: 2;
+    padding: 1px 3px;
+    font-size: 13px;
+    line-height: 1;
+    color: rgba(238, 241, 246, 0.85);
+    background: rgba(0, 0, 0, 0.45);
+    border-radius: 5px;
+    cursor: grab;
+    user-select: none;
+}
+
+/* ---------- 编辑态底栏 ---------- */
+.edit-bar {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    z-index: 45;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 10px 12px 10px 18px;
+    white-space: nowrap;
+    background: rgba(24, 28, 38, 0.96);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(12px);
+    transform: translateX(-50%);
+}
+
+.edit-hint {
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.edit-bar .btn-primary {
+    padding: 7px 18px;
+    font-size: 13.5px;
+}
+
+.tile-icon {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 56px;
+    height: 56px;
+    overflow: hidden;
+    border-radius: 17px;
+    font-size: 23px;
+    font-weight: 700;
+    color: #fff;
+    text-transform: uppercase;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.38);
+}
+
+.tile-letter {
+    line-height: 1;
+}
+
+/* 站点图标：放在一块亮色小底盘上。
+   - 用 contain 而非 cover，避免把 16×16 的小图标放大到整块（会糊）
+   - 底盘不透明，正好盖住下面的首字，透明图标也不会透出字母
+   - 网站图标多是为浅色底设计的，浅底盘比彩色底更还原 */
+.tile-favicon {
+    position: absolute;
+    inset: 9px;
+    width: 38px;
+    height: 38px;
+    padding: 3px;
+    object-fit: contain;
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 10px;
+}
+
+.tile-label {
+    max-width: 92px;
+    overflow: hidden;
+    font-size: 12.5px;
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: rgba(238, 241, 246, 0.88);
+}
+
+.tile-icon-add {
+    font-size: 26px;
+    font-weight: 400;
+    color: rgba(238, 241, 246, 0.75);
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px dashed rgba(255, 255, 255, 0.28);
+    box-shadow: none;
+}
+
+/* ---------- 状态提示 ---------- */
+.state {
+    padding: 36px 16px;
+    font-size: 14px;
+    color: var(--text-dim);
+}
+
+.state-error {
+    color: var(--danger);
+}
+
+.hint {
+    margin-bottom: 24px;
+    font-size: 13.5px;
+    color: rgba(238, 241, 246, 0.55);
+}
+
+/* ---------- 右键菜单 ---------- */
+.menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+}
+
+.context-menu {
+    position: fixed;
+    z-index: 51;
+    min-width: 170px;
+    margin: 0;
+    padding: 6px;
+    list-style: none;
+    background: rgba(24, 28, 38, 0.98);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(12px);
+}
+
+.menu-item {
+    position: relative;
+    padding: 8px 12px;
+    font-size: 13.5px;
+    color: var(--text);
+    white-space: nowrap;
+    border-radius: 7px;
+    cursor: pointer;
+    list-style: none;
+    transition: background 0.12s, color 0.12s;
+}
+
+.menu-item:hover {
+    background: var(--accent-soft);
+    color: var(--accent);
+}
+
+.menu-item.danger:hover {
+    background: rgba(255, 107, 107, 0.14);
+    color: var(--danger);
+}
+
+.menu-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+}
+
+.menu-link {
+    display: block;
+    margin: -8px -12px;
+    padding: 8px 12px;
+    color: inherit;
+    text-decoration: none;
+    border-radius: 7px;
+}
+
+.menu-sep {
+    height: 1px;
+    margin: 5px 8px;
+    padding: 0;
+    background: var(--border);
+    border: none;
+    list-style: none;
+}
+
+/* 二级菜单：纯 CSS hover 展开 */
+.submenu {
+    display: none;
+    position: absolute;
+    left: 100%;
+    top: -6px;
+    margin: 0 0 0 4px;
+    padding: 6px;
+    min-width: 128px;
+    list-style: none;
+    background: rgba(24, 28, 38, 0.98);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+}
+
+.has-sub:hover > .submenu {
+    display: block;
+}
+
+/* ---------- 弹窗 ---------- */
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(6, 8, 12, 0.62);
+    backdrop-filter: blur(4px);
+}
+
+.modal {
+    position: fixed;
+    z-index: 61;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(480px, calc(100vw - 32px));
+    background: linear-gradient(180deg, #1d222c, #161a22);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.62);
+}
+
+.modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.modal-close {
+    padding: 4px 9px;
+    font-size: 15px;
+    color: var(--text-dim);
+    background: none;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+
+.modal-close:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.modal-body {
+    padding: 18px;
+    max-height: min(72vh, 640px);
+    overflow-y: auto;
+}
+
+/* ---------- 表单 ---------- */
+.form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.field-label {
+    font-size: 12.5px;
+    color: var(--text-dim);
+}
+
+.input {
+    padding: 10px 12px;
+    font-size: 14px;
+    color: var(--text);
+    background: #10141b;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.input::placeholder {
+    color: #5c6675;
+}
+
+.input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.form-error {
+    margin: 0;
+    font-size: 13px;
+    color: var(--danger);
+}
+
+.form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.btn-primary,
+.btn-ghost,
+.btn-danger {
+    padding: 9px 20px;
+    font: inherit;
+    font-size: 14px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: filter 0.15s, opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.btn-primary {
+    font-weight: 600;
+    color: #0b1020;
+    background: var(--accent);
+    border: none;
+}
+
+.btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+}
+
+.btn-primary:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.btn-ghost {
+    color: var(--text-dim);
+    background: transparent;
+    border: 1px solid var(--border);
+}
+
+.btn-ghost:hover {
+    color: var(--text);
+    border-color: #3a4356;
+}
+
+.btn-danger {
+    font-weight: 600;
+    color: #fff;
+    background: var(--danger);
+    border: none;
+}
+
+.btn-danger:hover {
+    filter: brightness(1.08);
+}
+
+.confirm-msg {
+    margin: 0 0 16px;
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text);
+}
+
+/* ---------- 搜索引擎设置 ---------- */
+.engine-tip {
+    margin: 18px 0 12px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text-dim);
+}
+
+.engine-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 10px;
+}
+
+.engine-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 8px 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.engine-card:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.engine-card.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.engine-card-name {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 12.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.engine-badge {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+    color: #0b1020;
+    background: #4ade80;
+    border-radius: 50%;
+}
+
+.engine-card-del {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    font-size: 10px;
+    color: var(--text-dim);
+    background: rgba(0, 0, 0, 0.35);
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+
+.engine-card:hover .engine-card-del {
+    opacity: 1;
+}
+
+.engine-card-del:hover {
+    color: #fff;
+    background: var(--danger);
+}
+
+/* ---------- 背景层 ---------- */
+.bg,
+.bg-dim {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+}
+
+.bg {
+    background-position: center;
+    background-size: cover;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+}
+
+/* ---------- 右上角设置入口 ---------- */
+.settings-btn {
+    position: fixed;
+    top: 20px;
+    right: 22px;
+    z-index: 30;
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    padding: 9px;
+    color: rgba(238, 241, 246, 0.7);
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 50%;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    transition: color 0.15s, background 0.15s, transform 0.15s;
+}
+
+.settings-btn:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.14);
+    transform: rotate(18deg);
+}
+
+.settings-btn svg {
+    width: 100%;
+    height: 100%;
+}
+
+/* ---------- 抽屉 ---------- */
+.drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(6, 8, 12, 0.5);
+    backdrop-filter: blur(2px);
+}
+
+.drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 56;
+    display: flex;
+    flex-direction: column;
+    width: min(400px, 100vw);
+    background: linear-gradient(180deg, #1d222c, #15191f);
+    border-left: 1px solid var(--border);
+    box-shadow: -20px 0 60px rgba(0, 0, 0, 0.55);
+    animation: drawer-in 0.22s ease-out;
+}
+
+@keyframes drawer-in {
+    from {
+        transform: translateX(24px);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+.drawer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+}
+
+.drawer-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.drawer-close {
+    padding: 4px 9px;
+    font-size: 15px;
+    color: var(--text-dim);
+    background: none;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+
+.drawer-close:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.drawer-body {
+    flex: 1;
+    padding: 18px;
+    overflow-y: auto;
+}
+
+/* ---------- 设置面板 ---------- */
+.panel-section + .panel-section {
+    margin-top: 26px;
+    padding-top: 22px;
+    border-top: 1px solid var(--border);
+}
+
+.panel-heading {
+    margin: 0 0 14px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+}
+
+.field-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: rgba(238, 241, 246, 0.42);
+}
+
+.switch {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-top: 12px;
+    font-size: 13.5px;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.switch input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.range {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.textarea {
+    width: 100%;
+    padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--text);
+    resize: vertical;
+    background: #10141b;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.textarea::placeholder {
+    font-family: inherit;
+    color: #5c6675;
+}
+
+.textarea:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.saved-hint {
+    font-size: 12.5px;
+    color: #4ade80;
+}
+
+.import-ok {
+    margin: 10px 0 0;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: #4ade80;
+}
+
+.export-link {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 8px 16px;
+    font-size: 13.5px;
+    text-decoration: none;
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 560px) {
+    .stage-root {
+        padding: 40px 14px 56px;
+    }
+
+    .grid {
+        grid-template-columns: repeat(auto-fit, 78px);
+        gap: 16px 6px;
+    }
+
+    .tile-icon {
+        width: 50px;
+        height: 50px;
+        border-radius: 15px;
+        font-size: 20px;
+    }
+
+    .tile-label {
+        max-width: 76px;
+    }
+
+    .search {
+        padding: 9px 8px;
+    }
+
+    .engine-logo {
+        width: 26px;
+        height: 26px;
+        font-size: 12px;
+    }
+}
