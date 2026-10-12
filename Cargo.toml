@@ -28,6 +28,11 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
     "rustls-tls",
     "stream",
 ] }
+# 响应压缩（gzip）。dioxus-server 自身不做压缩，正式构建的客户端产物约 1MB，
+# 不压缩会原样传输。只开 gzip：brotli 大约只多省 15%，却要拉进整个 brotli crate。
+tower-http = { version = "0.6", optional = true, default-features = false, features = [
+    "compression-gzip",
+] }
 
 # ---- 仅 web（wasm）编译：首页时钟、搜索跳转 ----
 gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
@@ -44,6 +49,7 @@ server = [
     "dep:dotenvy",
     "dep:anyhow",
     "dep:reqwest",
+    "dep:tower-http",
 ]
 
 [profile.release]

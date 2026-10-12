@@ -45,6 +45,7 @@
 | 序列化 | serde / serde_json |
 | 配置 | dotenvy |
 | 一言（仅 server） | reqwest（复用 dioxus 已有的 rustls，无系统 OpenSSL 依赖） |
+| 响应压缩（仅 server） | tower-http（只开 gzip；详见"关键设计"） |
 | 时钟 / 搜索跳转（仅 web） | js-sys（`Date`）+ gloo-timers（1s 定时）+ web-sys（`window.open`） |
 
 ## 目录结构
@@ -96,7 +97,7 @@
 [features]
 default = []
 web    = ["dioxus/web", "dep:gloo-timers", "dep:js-sys", "dep:web-sys"]
-server = ["dioxus/server", "dep:sqlx", "dep:tokio", "dep:dotenvy", "dep:anyhow", "dep:reqwest"]
+server = ["dioxus/server", "dep:sqlx", "dep:tokio", "dep:dotenvy", "dep:anyhow", "dep:reqwest", "dep:tower-http"]
 ```
 
 WASM 产物里不含数据库驱动与 HTTP 客户端；服务端二进制里不含浏览器 JS 绑定。
@@ -196,6 +197,18 @@ SSR 阶段不发外部请求，首屏不会被第三方拖慢。
 该参数只在客户端生成：SSR 阶段设置本就还没加载，两边都是空，因此不会
 hydration 失配；参数就绪前先不渲染背景，避免先请求一次旧地址再换掉。
 
+**响应压缩由我们自己加。** dioxus-server 只静态服务、不做压缩（实测带上
+`Accept-Encoding: gzip, br` 也没有 `content-encoding`），而正式构建的 wasm 有
+1.01 MB，会原样传输。所以在 router 上挂了一层
+`tower_http::compression::CompressionLayer`，wasm 从 1.01 MB 降到 0.43 MB。
+
+**只开 gzip，不开 brotli**：brotli 大约只再多省 15%，却要引入整个 `brotli` crate；
+而 gzip 由 `flate2` + `miniz_oxide` + `adler2` + `crc32fast` 提供（都是纯 Rust 小 crate）。
+注意这**不是零成本**——`tower-http` 虽然本就在依赖树里，但它的压缩后端不在。
+
+如果部署时前面挂了 nginx/Caddy 做压缩，这层就是冗余的（不会重复压缩，因为已经
+带了 `content-encoding`，规范上代理不该再压），可以去掉。
+
 **站点图标由服务端代取并落库。** 浏览器只请求本服务的 `/icon/{host}`，
 服务端按 `host` 命中缓存（`favicons` 表）就直接返回，否则去取并写入。
 取图顺序：先试站点自带 `/favicon.ico`，不是图片再抓首页 HTML 解析
@@ -254,8 +267,17 @@ cargo check --no-default-features --features web --target wasm32-unknown-unknown
 dx build --release --platform web
 ```
 
-产物在 `target/dx/mtab-lite/release/web/`（是否同时包含服务端二进制与客户端
-资源，以实际输出为准）。
+产物在 `target/dx/mtab-lite/release/web/`：客户端资源在 `public/`，
+服务端二进制名为 `server`（Windows 下 `server.exe`）。
+
+**务必用 release 构建对外提供服务。** 开发构建与正式构建的客户端体积差得很远：
+
+| | `dx serve`（开发） | `dx build --release` |
+|---|---|---|
+| wasm | 63.5 MB | 1.01 MB |
+| 首屏总下载 | 63.5 MB | 1.08 MB（gzip 后约 0.43 MB） |
+
+本地想看接近真实的速度，用 `dx serve -r`（release 模式 serve）。
 
 ## Docker
 
@@ -283,6 +305,9 @@ docker run -d --name mtab-lite \
   因此需要对方允许跨站引用（CSS 背景图不受 CORS 限制，但可能被防盗链拦）。
 - **随机模式下限流**：随机图接口每次打开都会真下载一张图（实测约 1MB / 2 秒），
   且要在 hydration 之后才开始，所以首屏会有一小段没有壁纸。
+- **开发构建的客户端极大**：`dx serve` 的 wasm 有 63.5 MB（不优化且带调试信息），
+  正式构建只有 1.01 MB。本地调试感觉慢是正常的，用 `dx serve -r`。
+- **只做 gzip 压缩**，没有 brotli / zstd。要更省传输就交给反向代理。
 - **无鉴权。** 单用户自部署定位，公网暴露请自行加反向代理鉴权。
 - **拖拽重排只支持鼠标。** 用的是原生 HTML5 拖放，触屏浏览器不触发；触屏上
   长按仍可进入编辑态，但调整顺序需要指针事件版本（未实现）。

@@ -69,7 +69,10 @@ fn main() {
                 .route(
                     "/icon/{host}",
                     dioxus::server::axum::routing::get(favicon::icon_handler),
-                );
+                )
+                // 响应压缩：dioxus-server 自身不做，正式构建的 wasm 约 1MB，
+                // 加上 gzip 后传输量约降到四成。由客户端 Accept-Encoding 决定。
+                .layer(tower_http::compression::CompressionLayer::new());
 
             Ok(router)
         });
