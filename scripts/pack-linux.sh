@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 在本机（Linux / WSL）原生打包，产物落到 dist/ 下。
+# 在本机（Linux / WSL）原生打包，产物落到 dist/<架构>/ 下。
 # Docker 只负责把产物打进镜像（见 Dockerfile.prebuilt），不在容器里编译。
 #
 # 用法：
-#   bash scripts/pack-linux.sh                              # 只打本机架构 -> dist/linux/
-#   bash scripts/pack-linux.sh aarch64-unknown-linux-gnu     # 交叉打 arm64 -> dist/linux-<triple>/
+#   bash scripts/pack-linux.sh                              # 本机架构 -> dist/amd64/
+#   bash scripts/pack-linux.sh aarch64-unknown-linux-gnu     # 交叉 arm64 -> dist/arm64/
 #   bash scripts/pack-linux.sh aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf
 #
 # 关于多架构：
@@ -39,6 +39,19 @@ if [ "${#TARGETS[@]}" -eq 0 ]; then
     TARGETS=("$HOST_TRIPLE")
 fi
 
+# target triple -> Docker 架构名（同时用作产物目录名）
+docker_arch() {
+    case "$1" in
+        x86_64-*)      echo amd64 ;;
+        aarch64-*)     echo arm64 ;;
+        armv7-*|arm-*) echo arm ;;
+        i686-*)        echo 386 ;;
+        riscv64*)      echo riscv64 ;;
+        loongarch64-*) echo loong64 ;;
+        *)             echo "${1%%-*}" ;;
+    esac
+}
+
 echo ">> 构建客户端（wasm，与架构无关）"
 dx build --release --platform web
 
@@ -48,10 +61,6 @@ if [ ! -d "$DX_OUT/public" ]; then
     exit 1
 fi
 
-out_dir_for() {   # 宿主用 dist/linux，其它架构用 dist/linux-<triple>
-    if [ "$1" = "$HOST_TRIPLE" ]; then echo "dist/linux"; else echo "dist/linux-$1"; fi
-}
-
 stage() {         # $1=服务端二进制路径  $2=输出目录
     local dest="$REPO_ROOT/$2"
     rm -rf "$dest"
@@ -59,11 +68,11 @@ stage() {         # $1=服务端二进制路径  $2=输出目录
     cp -r "$DX_OUT/public" "$dest/public"
     if [ -f "$DX_OUT/.manifest.json" ]; then cp "$DX_OUT/.manifest.json" "$dest/"; fi
     cp "$1" "$dest/server"     # 运行镜像按 /app/server 启动
-    printf '   -> %-30s %s\n' "$2" "$(file -b "$dest/server" | cut -d, -f1-2)"
+    printf '   -> %-10s %s\n' "$2" "$(file -b "$dest/server" | cut -d, -f1-2)"
 }
 
 for t in "${TARGETS[@]}"; do
-    dest="$(out_dir_for "$t")"
+    dest="dist/$(docker_arch "$t")"
     if [ "$t" = "$HOST_TRIPLE" ]; then
         echo ">> 宿主架构 $t"
         stage "$DX_OUT/server" "$dest"
@@ -81,6 +90,8 @@ done
 
 echo
 echo ">> 产物目录："
-for t in "${TARGETS[@]}"; do echo "   $(out_dir_for "$t")"; done
-echo ">> 打包示例（只 COPY，不编译）："
-echo "   docker build -f Dockerfile.prebuilt -t mtab-lite:prebuilt dist/linux"
+for t in "${TARGETS[@]}"; do echo "   dist/$(docker_arch "$t")"; done
+echo ">> 打成镜像（只 COPY，不编译）："
+echo "   docker build -f Dockerfile.prebuilt -t nekotab:local dist/amd64"
+echo ">> 或直接构建并推送多架构镜像："
+echo "   bash scripts/publish.sh"

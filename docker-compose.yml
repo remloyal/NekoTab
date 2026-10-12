@@ -1,0 +1,47 @@
+# 单容器应用的 compose 配置：只负责「打包产物进镜像 + 运行」，不在容器里编译。
+#
+# 前置：先在 Linux 本机打包好产物（见 scripts/pack-linux.sh）：
+#   bash scripts/pack-linux.sh
+#   docker compose up -d
+#
+# 常用命令：
+#   docker compose logs -f
+#   docker compose up -d --build      # 产物更新后重建镜像并重启
+#   docker compose down               # 停止（保留数据卷）
+#   docker compose down -v            # 停止并清空数据
+#
+# 说明：
+#   * 监听地址变量是 IP 不是 HOST（由 dioxus-cli-config 读取），详见 README。
+#   * 数据落在命名卷 mtab-data 的 /data 下，容器重建不丢。
+#   * 换其它架构：把 context 指向对应产物目录，例如
+#       context: dist/arm64
+#     在目标机器上原生构建镜像时不需要 QEMU。
+#   * 想改成「容器内从源码编译」：context 换成 .、dockerfile 换成 Dockerfile，
+#     并把 image 改成 mtab-lite:latest。
+services:
+  mtab-lite:
+    build:
+      context: dist/amd64
+      dockerfile: ../../Dockerfile.prebuilt
+    image: mtab-lite:prebuilt
+    container_name: mtab-lite
+    ports:
+      # 宿主端口默认 8080，可用 MTAB_PORT 覆盖；本机跑着 dx serve 时它会占用 8080。
+      - "${MTAB_PORT:-8080}:8080"
+    volumes:
+      - mtab-data:/data
+    environment:
+      IP: 0.0.0.0
+      PORT: "8080"
+      DATABASE_URL: "sqlite:///data/mtab.db?mode=rwc"
+    restart: unless-stopped
+    # 运行镜像里没有 curl/wget，用 bash 的 /dev/tcp 做 TCP 探活即可。
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mtab-data:
