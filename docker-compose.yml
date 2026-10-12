@@ -1,35 +1,31 @@
-# 单容器应用的 compose 配置：只负责「打包产物进镜像 + 运行」，不在容器里编译。
-#
-# 前置：先在 Linux 本机打包好产物（见 scripts/pack-linux.sh）：
-#   bash scripts/pack-linux.sh
-#   docker compose up -d
+# 单容器应用的 compose 配置。默认直接使用已发布的多架构镜像（Docker Hub）。
 #
 # 常用命令：
+#   docker compose up -d                          # 拉取 remloyal001/nekotab:latest 并启动
 #   docker compose logs -f
-#   docker compose up -d --build      # 产物更新后重建镜像并重启
-#   docker compose down               # 停止（保留数据卷）
-#   docker compose down -v            # 停止并清空数据
+#   docker compose pull && docker compose up -d    # 升级到新镜像
+#   docker compose down                            # 停止（保留数据卷）
+#   docker compose down -v                         # 停止并清空数据
 #
 # 说明：
 #   * 监听地址变量是 IP 不是 HOST（由 dioxus-cli-config 读取），详见 README。
-#   * 数据落在命名卷 mtab-data 的 /data 下，容器重建不丢。
-#   * 换其它架构：把 context 指向对应产物目录，例如
-#       context: dist/arm64
-#     在目标机器上原生构建镜像时不需要 QEMU。
-#   * 想改成「容器内从源码编译」：context 换成 .、dockerfile 换成 Dockerfile，
-#     并把 image 改成 mtab-lite:latest。
+#   * 宿主端口默认 8080，可用 NEKOTAB_PORT 覆盖；本机跑 dx serve 时它会占用 8080。
+#   * 数据落在命名卷 nekotab-data 的 /data 下，容器重建不丢。
+#
+#   想改成「用本机打包的产物构建镜像」（不经过 Docker Hub）：
+#     bash scripts/pack-linux.sh        # 产物在 dist/amd64（arm64 则是 dist/arm64）
+#     然后注释掉下面的 image，启用 build（context 按目标架构改）。
 services:
-  mtab-lite:
-    build:
-      context: dist/amd64
-      dockerfile: ../../Dockerfile.prebuilt
-    image: mtab-lite:prebuilt
-    container_name: mtab-lite
+  nekotab:
+    image: remloyal001/nekotab:latest
+    # build:
+    #   context: dist/amd64
+    #   dockerfile: ../../Dockerfile.prebuilt
+    container_name: nekotab
     ports:
-      # 宿主端口默认 8080，可用 MTAB_PORT 覆盖；本机跑着 dx serve 时它会占用 8080。
-      - "${MTAB_PORT:-8080}:8080"
+      - "${NEKOTAB_PORT:-8080}:8080"
     volumes:
-      - mtab-data:/data
+      - nekotab-data:/data
     environment:
       IP: 0.0.0.0
       PORT: "8080"
@@ -44,4 +40,4 @@ services:
       start_period: 10s
 
 volumes:
-  mtab-data:
+  nekotab-data:
