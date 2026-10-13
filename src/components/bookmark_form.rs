@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::backend::{add_bookmark, error_text, update_bookmark};
-use crate::models::{Bookmark, NewBookmark};
+use crate::models::{Bookmark, Group, NewBookmark};
 
 /// 书签表单，作为弹窗内容使用。
 ///
@@ -10,6 +10,9 @@ use crate::models::{Bookmark, NewBookmark};
 #[component]
 pub fn BookmarkForm(
     bookmark: Option<Bookmark>,
+    groups: Vec<Group>,
+    /// 新增时的默认分组（跟着当前筛选走，省得每次都手工选）
+    default_group: Option<i64>,
     on_saved: EventHandler<()>,
     on_cancel: EventHandler<()>,
 ) -> Element {
@@ -27,6 +30,15 @@ pub fn BookmarkForm(
             .unwrap_or_default()
     });
     let mut tags = use_signal(|| existing.as_ref().map(|b| b.tags.clone()).unwrap_or_default());
+    // 下拉框的值统一用字符串：空串即"未分组"，这样 select 的 value 不必处理 Option
+    let mut group_id = use_signal(|| {
+        existing
+            .as_ref()
+            .and_then(|b| b.group_id)
+            .or(default_group)
+            .map(|id| id.to_string())
+            .unwrap_or_default()
+    });
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 
@@ -40,6 +52,7 @@ pub fn BookmarkForm(
             url: url(),
             description: description(),
             tags: tags(),
+            group_id: group_id().parse().ok(),
         };
 
         spawn(async move {
@@ -105,10 +118,26 @@ pub fn BookmarkForm(
             }
 
             label { class: "field",
-                span { class: "field-label", "标签" }
+                span { class: "field-label", "分组" }
+                select {
+                    class: "input",
+                    value: "{group_id}",
+                    onchange: move |e| group_id.set(e.value()),
+                    option { value: "", "未分组" }
+                    for group in groups {
+                        option { value: "{group.id}", "{group.name}" }
+                    }
+                }
+                p { class: "field-hint",
+                    "分组决定卡片出现在哪个分类标签页下；在设置 → 分组管理里增删。"
+                }
+            }
+
+            label { class: "field",
+                span { class: "field-label", "标签（可选）" }
                 input {
                     class: "input",
-                    placeholder: "逗号分隔，会成为上方分类，如：开发, 文档",
+                    placeholder: "逗号分隔，用于搜索与筛选，如：开发, 文档",
                     value: "{tags}",
                     oninput: move |e| tags.set(e.value()),
                 }

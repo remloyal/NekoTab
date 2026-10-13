@@ -8,7 +8,8 @@
 use dioxus::prelude::*;
 
 use crate::models::{
-    Bookmark, Engine, ImportReport, NewBookmark, NewEngine, Quote, Settings,
+    Bookmark, Engine, Group, ImportReport, NewBookmark, NewEngine, NewGroup, Quote, Settings,
+    TrashItem,
 };
 
 /// 把 `ServerFnError` 转成可直接展示给用户的文案。
@@ -46,6 +47,8 @@ fn like_pattern(word: &str) -> String {
 /// 结构固定：每个关键词对应一个括号分组，组内在 title / url / description /
 /// tags 四个字段间 OR；组与组之间 AND。字段数固定为 4，所以每个关键词要
 /// 绑定 4 个相同的模式参数。
+///
+/// 回收站里的条目（`deleted_at` 非空）永远不出现在这里。
 #[cfg(feature = "server")]
 fn build_search_sql(keyword_count: usize) -> String {
     const CLAUSE: &str = "(title LIKE ? ESCAPE '\\' \
@@ -54,12 +57,13 @@ fn build_search_sql(keyword_count: usize) -> String {
                            OR tags LIKE ? ESCAPE '\\')";
 
     let mut sql = String::from(
-        "SELECT id, title, url, description, tags, created_at FROM bookmarks",
+        "SELECT id, title, url, description, tags, group_id, created_at FROM bookmarks \
+         WHERE deleted_at IS NULL",
     );
 
     if keyword_count > 0 {
         let clauses = vec![CLAUSE; keyword_count];
-        sql.push_str(" WHERE ");
+        sql.push_str(" AND ");
         sql.push_str(&clauses.join(" AND "));
     }
 
@@ -67,10 +71,12 @@ fn build_search_sql(keyword_count: usize) -> String {
     sql
 }
 
-/// 校验并规范化书签入参，返回 `(title, url, description, tags)`。
+/// 校验并规范化书签入参，返回 `(title, url, description, tags, group_id)`。
 /// 新增与修改共用，避免两处校验漂移。
 #[cfg(feature = "server")]
-fn clean_bookmark(input: &NewBookmark) -> Result<(String, String, String, String), String> {
+async fn clean_bookmark(
+    input: &NewBookmark,
+) -> Result<(String, String, String, String, Option<i64>), String> {
     let title = input.title.trim().to_string();
     let url = input.url.trim().to_string();
     let description = input.description.trim().to_string();
@@ -85,21 +91,71 @@ fn clean_bookmark(input: &NewBookmark) -> Result<(String, String, String, String
         return Err("URL 需以 http:// 或 https:// 开头".to_string());
     }
 
-    Ok((title, url, description, normalize_tags(&input.tags)))
+    // 分组可能已被删掉，落库前确认一次；不存在就当归到"未分组"，
+    // 免得留下指向空气的 group_id 让条目在任何分组标签下都不显示。
+    let group_id = match input.group_id {
+        Some(id) => sqlx::query_scalar::<_, i64>("SELECT id FROM groups WHERE id = ?")
+            .bind(id)
+            .fetch_optional(crate::db::pool())
+            .await
+            .map_err(|e| format!("检查分组失败: {e}"))?,
+        None => None,
+    };
+
+    Ok((title, url, description, normalize_tags(&input.tags), group_id))
 }
 
-/// 规范化标签：按逗号拆分、去空白、丢空项、重新用逗号连接。
+/// 规范化标签：按逗号拆分、去空白、丢空项、去重、重新用逗号连接。
 #[cfg(feature = "server")]
 fn normalize_tags(raw: &str) -> String {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
+    split_tags(raw).join(",")
+}
+
+/// 拆出标签列表（去空白、丢空项、保持首次出现的顺序、去重）。
+#[cfg(feature = "server")]
+fn split_tags(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tag in raw.split(',') {
+        let tag = tag.trim();
+        if !tag.is_empty() && !out.iter().any(|existing| existing == tag) {
+            out.push(tag.to_string());
+        }
+    }
+    out
+}
+
+/// 批量打标签：在现有标签上叠加，已存在的跳过。
+#[cfg(feature = "server")]
+fn merge_tags(current: &str, add: &str) -> String {
+    let mut tags = split_tags(current);
+    for tag in split_tags(add) {
+        if !tags.iter().any(|existing| existing == &tag) {
+            tags.push(tag);
+        }
+    }
+    tags.join(",")
+}
+
+/// 批量去标签。
+#[cfg(feature = "server")]
+fn drop_tags(current: &str, remove: &str) -> String {
+    let doomed = split_tags(remove);
+    split_tags(current)
+        .into_iter()
+        .filter(|tag| !doomed.iter().any(|d| d == tag))
         .collect::<Vec<_>>()
         .join(",")
 }
 
+// ---------------------------------------------------------------------------
+// 书签
+// ---------------------------------------------------------------------------
+
 /// 列出书签。`query` 按空格拆成多个关键词，关键词之间 AND，
 /// 每个关键词在 title / url / description / tags 四个字段间 OR。
+///
+/// 前端的即时筛选是纯客户端做的（列表本就是全量），这个带关键词的入口
+/// 保留给接口调用方，逻辑与单测都在。
 #[server]
 pub async fn list_bookmarks(query: String) -> Result<Vec<Bookmark>, ServerFnError> {
     use crate::db;
@@ -126,38 +182,41 @@ pub async fn list_bookmarks(query: String) -> Result<Vec<Bookmark>, ServerFnErro
 pub async fn add_bookmark(input: NewBookmark) -> Result<i64, ServerFnError> {
     use crate::db;
 
-    let (title, url, description, tags) =
-        clean_bookmark(&input).map_err(ServerFnError::new)?;
+    let (title, url, description, tags, group_id) =
+        clean_bookmark(&input).await.map_err(ServerFnError::new)?;
 
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO bookmarks (title, url, description, tags, sort_order) \
-         VALUES (?, ?, ?, ?, COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
+        "INSERT INTO bookmarks (title, url, description, tags, group_id, sort_order) \
+         VALUES (?, ?, ?, ?, ?, COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
     .bind(title)
     .bind(url)
     .bind(description)
     .bind(tags)
+    .bind(group_id)
     .fetch_one(db::pool())
     .await
     .map_err(|e| ServerFnError::new(format!("保存书签失败: {e}")))
 }
 
-/// 修改已有书签（标题 / URL / 描述 / 标签），不改排序位。
+/// 修改已有书签（标题 / URL / 描述 / 标签 / 分组），不改排序位。
 #[server]
 pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFnError> {
     use crate::db;
 
-    let (title, url, description, tags) =
-        clean_bookmark(&input).map_err(ServerFnError::new)?;
+    let (title, url, description, tags, group_id) =
+        clean_bookmark(&input).await.map_err(ServerFnError::new)?;
 
     let affected = sqlx::query(
-        "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ? WHERE id = ?",
+        "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ? \
+         WHERE id = ?",
     )
     .bind(title)
     .bind(url)
     .bind(description)
     .bind(tags)
+    .bind(group_id)
     .bind(id)
     .execute(db::pool())
     .await
@@ -173,7 +232,8 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
 
 /// 按传入的 id 顺序重写 `sort_order`（0, 1, 2, …）。
 ///
-/// 前端只在没有搜索词时允许拖拽，此时传入的是全量列表，因此能整体覆盖。
+/// 前端传的是**全量**顺序（列表始终取全量），因此能整体覆盖。分页只影响显示，
+/// 拖拽仍然作用在全量顺序上。
 #[server]
 pub async fn reorder_bookmarks(ids: Vec<i64>) -> Result<(), ServerFnError> {
     use crate::db;
@@ -199,16 +259,383 @@ pub async fn reorder_bookmarks(ids: Vec<i64>) -> Result<(), ServerFnError> {
     Ok(())
 }
 
-/// 删除书签。幂等：删除不存在的 id 不报错。
+/// 删除书签 —— 实际是软删除，进回收站，可在设置里还原。
+///
+/// 幂等：删除不存在的 id 不报错。
 #[server]
 pub async fn delete_bookmark(id: i64) -> Result<(), ServerFnError> {
+    delete_bookmarks(vec![id]).await.map(|_| ())
+}
+
+/// 批量软删除，返回实际移入回收站的条数。
+///
+/// 逐条 UPDATE 而不是拼 `IN (?, ?, …)`：SQLite 没有数组绑定，动态拼占位符
+/// 反而更容易出错；这些语句都在同一个事务里，几百条也只是一次提交。
+#[server]
+pub async fn delete_bookmarks(ids: Vec<i64>) -> Result<usize, ServerFnError> {
     use crate::db;
 
-    sqlx::query("DELETE FROM bookmarks WHERE id = ?")
-        .bind(id)
-        .execute(db::pool())
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = db::pool()
+        .begin()
         .await
-        .map_err(|e| ServerFnError::new(format!("删除书签失败: {e}")))?;
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    let mut affected = 0usize;
+    for id in &ids {
+        affected += sqlx::query(
+            "UPDATE bookmarks SET deleted_at = datetime('now') \
+             WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("删除书签失败: {e}")))?
+        .rows_affected() as usize;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交删除失败: {e}")))?;
+
+    Ok(affected)
+}
+
+/// 批量打标签 / 去标签。`mode` 为 `"add"` 或 `"remove"`。
+///
+/// 只动列表里的这几条，其余标签保持不变。
+#[server]
+pub async fn tag_bookmarks(
+    ids: Vec<i64>,
+    tags: String,
+    mode: String,
+) -> Result<usize, ServerFnError> {
+    use crate::db;
+
+    let tags = tags.trim().to_string();
+    if ids.is_empty() || tags.is_empty() {
+        return Ok(0);
+    }
+
+    let removing = match mode.as_str() {
+        "add" => false,
+        "remove" => true,
+        other => return Err(ServerFnError::new(format!("未知的标签操作: {other}"))),
+    };
+
+    let pool = db::pool();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    let mut affected = 0usize;
+    for id in &ids {
+        let current: Option<String> = sqlx::query_scalar("SELECT tags FROM bookmarks WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("读取标签失败: {e}")))?;
+
+        let Some(current) = current else { continue };
+
+        let next = if removing {
+            drop_tags(&current, &tags)
+        } else {
+            merge_tags(&current, &tags)
+        };
+
+        if next == current {
+            continue;
+        }
+
+        sqlx::query("UPDATE bookmarks SET tags = ? WHERE id = ?")
+            .bind(next)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("更新标签失败: {e}")))?;
+
+        affected += 1;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交标签失败: {e}")))?;
+
+    Ok(affected)
+}
+
+/// 批量移动到某个分组；`group_id` 为 `None` 表示移到"未分组"。
+#[server]
+pub async fn move_bookmarks(ids: Vec<i64>, group_id: Option<i64>) -> Result<usize, ServerFnError> {
+    use crate::db;
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let pool = db::pool();
+
+    // 与 clean_bookmark 同理：分组不存在就归到"未分组"
+    let group_id = match group_id {
+        Some(id) => sqlx::query_scalar::<_, i64>("SELECT id FROM groups WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ServerFnError::new(format!("检查分组失败: {e}")))?,
+        None => None,
+    };
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    let mut affected = 0usize;
+    for id in &ids {
+        affected += sqlx::query("UPDATE bookmarks SET group_id = ? WHERE id = ? AND group_id IS NOT ?")
+            .bind(group_id)
+            .bind(id)
+            .bind(group_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("移动分组失败: {e}")))?
+            .rows_affected() as usize;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交移动失败: {e}")))?;
+
+    Ok(affected)
+}
+
+// ---------------------------------------------------------------------------
+// 回收站
+// ---------------------------------------------------------------------------
+
+/// 回收站列表，最近删的在前。
+#[server]
+pub async fn list_trash() -> Result<Vec<TrashItem>, ServerFnError> {
+    use crate::db;
+
+    sqlx::query_as::<_, TrashItem>(
+        "SELECT id, title, url, deleted_at FROM bookmarks \
+         WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id DESC",
+    )
+    .fetch_all(db::pool())
+    .await
+    .map_err(|e| ServerFnError::new(format!("读取回收站失败: {e}")))
+}
+
+/// 把回收站里的书签还原回列表，返回还原条数。
+#[server]
+pub async fn restore_bookmarks(ids: Vec<i64>) -> Result<usize, ServerFnError> {
+    use crate::db;
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = db::pool()
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    let mut affected = 0usize;
+    for id in &ids {
+        affected += sqlx::query(
+            "UPDATE bookmarks SET deleted_at = NULL WHERE id = ? AND deleted_at IS NOT NULL",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("还原书签失败: {e}")))?
+        .rows_affected() as usize;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交还原失败: {e}")))?;
+
+    Ok(affected)
+}
+
+/// 彻底删除（不可恢复）。传全部 id 即"清空回收站"。
+#[server]
+pub async fn purge_bookmarks(ids: Vec<i64>) -> Result<usize, ServerFnError> {
+    use crate::db;
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = db::pool()
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    let mut affected = 0usize;
+    for id in &ids {
+        affected += sqlx::query("DELETE FROM bookmarks WHERE id = ? AND deleted_at IS NOT NULL")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("彻底删除失败: {e}")))?
+            .rows_affected() as usize;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交彻底删除失败: {e}")))?;
+
+    Ok(affected)
+}
+
+// ---------------------------------------------------------------------------
+// 分组
+// ---------------------------------------------------------------------------
+
+/// 列出所有分组，按自定义顺序。
+#[server]
+pub async fn list_groups() -> Result<Vec<Group>, ServerFnError> {
+    use crate::db;
+
+    sqlx::query_as::<_, Group>(
+        "SELECT id, name, icon FROM groups ORDER BY sort_order ASC, id ASC",
+    )
+    .fetch_all(db::pool())
+    .await
+    .map_err(|e| ServerFnError::new(format!("加载分组失败: {e}")))
+}
+
+/// 新增分组，落在末尾。返回新 id。
+#[server]
+pub async fn add_group(input: NewGroup) -> Result<i64, ServerFnError> {
+    use crate::db;
+
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ServerFnError::new("分组名不能为空"));
+    }
+
+    let pool = db::pool();
+
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM groups WHERE name = ?")
+        .bind(&name)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| ServerFnError::new(format!("检查分组失败: {e}")))?;
+    if exists > 0 {
+        return Err(ServerFnError::new(format!("分组「{name}」已存在")));
+    }
+
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO groups (name, icon, sort_order) \
+         VALUES (?, ?, COALESCE((SELECT MAX(sort_order) FROM groups), 0) + 1) RETURNING id",
+    )
+    .bind(&name)
+    .bind(input.icon.trim())
+    .fetch_one(pool)
+    .await
+    .map_err(|e| ServerFnError::new(format!("保存分组失败: {e}")))
+}
+
+/// 重命名 / 改图标。
+#[server]
+pub async fn update_group(id: i64, input: NewGroup) -> Result<(), ServerFnError> {
+    use crate::db;
+
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ServerFnError::new("分组名不能为空"));
+    }
+
+    let pool = db::pool();
+
+    let clash: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM groups WHERE name = ? AND id <> ?")
+        .bind(&name)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| ServerFnError::new(format!("检查分组失败: {e}")))?;
+    if clash > 0 {
+        return Err(ServerFnError::new(format!("分组「{name}」已存在")));
+    }
+
+    let affected = sqlx::query("UPDATE groups SET name = ?, icon = ? WHERE id = ?")
+        .bind(&name)
+        .bind(input.icon.trim())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| ServerFnError::new(format!("修改分组失败: {e}")))?
+        .rows_affected();
+
+    if affected == 0 {
+        return Err(ServerFnError::new("该分组已不存在"));
+    }
+
+    Ok(())
+}
+
+/// 删除分组。组内书签归到"未分组"，书签本身不删。
+#[server]
+pub async fn delete_group(id: i64) -> Result<(), ServerFnError> {
+    use crate::db;
+
+    let pool = db::pool();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    // 回收站里的书签也要一起归位，否则还原后仍指向已删的分组
+    sqlx::query("UPDATE bookmarks SET group_id = NULL WHERE group_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("归位组内书签失败: {e}")))?;
+
+    sqlx::query("DELETE FROM groups WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("删除分组失败: {e}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交删除分组失败: {e}")))?;
+
+    Ok(())
+}
+
+/// 按传入的 id 顺序重写分组的 `sort_order`（0, 1, 2, …）。
+#[server]
+pub async fn reorder_groups(ids: Vec<i64>) -> Result<(), ServerFnError> {
+    use crate::db;
+
+    let mut tx = db::pool()
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    for (index, id) in ids.iter().enumerate() {
+        sqlx::query("UPDATE groups SET sort_order = ? WHERE id = ?")
+            .bind(index as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("更新分组排序失败: {e}")))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交分组排序失败: {e}")))?;
 
     Ok(())
 }
@@ -222,10 +649,22 @@ pub async fn delete_bookmark(id: i64) -> Result<(), ServerFnError> {
 pub async fn list_engines() -> Result<Vec<Engine>, ServerFnError> {
     use crate::db;
 
-    sqlx::query_as::<_, Engine>("SELECT id, name, url, icon, active FROM engines ORDER BY id")
-        .fetch_all(db::pool())
-        .await
-        .map_err(|e| ServerFnError::new(format!("加载搜索引擎失败: {e}")))
+    sqlx::query_as::<_, Engine>(
+        "SELECT id, name, url, icon, active, prefix FROM engines ORDER BY id",
+    )
+    .fetch_all(db::pool())
+    .await
+    .map_err(|e| ServerFnError::new(format!("加载搜索引擎失败: {e}")))
+}
+
+/// 规范化前缀：小写、只留字母数字与 `-`，避免和关键词粘连产生歧义。
+#[cfg(feature = "server")]
+fn normalize_prefix(raw: &str) -> String {
+    raw.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect()
 }
 
 /// 新增搜索引擎。地址必须含 `%s` 占位；若当前没有任何引擎被选中，新的自动生效。
@@ -236,6 +675,7 @@ pub async fn add_engine(input: NewEngine) -> Result<i64, ServerFnError> {
     let name = input.name.trim().to_string();
     let url = input.url.trim().to_string();
     let icon = input.icon.trim().to_string();
+    let prefix = normalize_prefix(&input.prefix);
 
     if name.is_empty() {
         return Err(ServerFnError::new("名称不能为空"));
@@ -249,12 +689,24 @@ pub async fn add_engine(input: NewEngine) -> Result<i64, ServerFnError> {
 
     let pool = db::pool();
 
+    if !prefix.is_empty() {
+        let clash: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM engines WHERE prefix = ?")
+            .bind(&prefix)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| ServerFnError::new(format!("检查前缀失败: {e}")))?;
+        if clash > 0 {
+            return Err(ServerFnError::new(format!("前缀「{prefix}」已被其他引擎占用")));
+        }
+    }
+
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO engines (name, url, icon, active) VALUES (?, ?, ?, 0) RETURNING id",
+        "INSERT INTO engines (name, url, icon, active, prefix) VALUES (?, ?, ?, 0, ?) RETURNING id",
     )
     .bind(name)
     .bind(url)
     .bind(icon)
+    .bind(prefix)
     .fetch_one(pool)
     .await
     .map_err(|e| ServerFnError::new(format!("保存搜索引擎失败: {e}")))?;
@@ -342,21 +794,7 @@ pub async fn get_settings() -> Result<Settings, ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(format!("读取设置失败: {e}")))?;
 
-    let mut settings = Settings::default();
-    for (key, value) in rows {
-        match key.as_str() {
-            "background_url" => settings.background_url = value,
-            "background_dim" => {
-                settings.background_dim = value.parse().unwrap_or(35).clamp(0, 80);
-            }
-            "background_random" => settings.background_random = value != "0",
-            "show_clock" => settings.show_clock = value != "0",
-            "show_quote" => settings.show_quote = value != "0",
-            _ => {}
-        }
-    }
-
-    Ok(settings)
+    Ok(Settings::from_pairs(rows))
 }
 
 /// 保存主页设置（逐键 upsert）。
@@ -375,29 +813,13 @@ pub async fn save_settings(input: Settings) -> Result<(), ServerFnError> {
         ));
     }
 
-    let pairs = [
-        ("background_url", background_url),
-        ("background_dim", input.background_dim.clamp(0, 80).to_string()),
-        (
-            "background_random",
-            if input.background_random { "1" } else { "0" }.to_string(),
-        ),
-        (
-            "show_clock",
-            if input.show_clock { "1" } else { "0" }.to_string(),
-        ),
-        (
-            "show_quote",
-            if input.show_quote { "1" } else { "0" }.to_string(),
-        ),
-    ];
-
     let mut tx = db::pool()
         .begin()
         .await
         .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
 
-    for (key, value) in pairs {
+    // 取值范围由 Settings::to_pairs 统一夹好，落库即是可信值
+    for (key, value) in input.to_pairs() {
         sqlx::query(
             "INSERT INTO settings (key, value) VALUES (?, ?) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -423,6 +845,8 @@ pub async fn save_settings(input: Settings) -> Result<(), ServerFnError> {
 /// 批量导入。自动识别浏览器导出的书签 HTML 与本应用的 JSON 备份。
 ///
 /// 按 URL 去重（含库内已有的）；新记录追加在现有排序之后，并保持文件内顺序。
+/// JSON 备份里的 `group` 会按名字对应到分组，分组不存在则自动建。
+/// 浏览器 HTML 里的文件夹路径仍然进 tags（分类改由分组承担，tags 只作检索词）。
 #[server]
 pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnError> {
     use crate::db;
@@ -434,7 +858,8 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         ));
     }
 
-    let mut tx = db::pool()
+    let pool = db::pool();
+    let mut tx = pool
         .begin()
         .await
         .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
@@ -450,6 +875,21 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         .await
         .map_err(|e| ServerFnError::new(format!("计算排序位失败: {e}")))?;
 
+    // 已有的分组名 → id，边导入边补
+    let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM groups")
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("读取分组失败: {e}")))?;
+    let mut group_ids: std::collections::HashMap<String, i64> = rows
+        .into_iter()
+        .map(|(id, name)| (name, id))
+        .collect();
+    let mut next_group_sort: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM groups")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("计算分组排序位失败: {e}")))?;
+
     let mut report = ImportReport::default();
 
     for item in parsed {
@@ -461,16 +901,38 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
             continue;
         }
 
+        // 备份里的分组名：没有就建一个，保证还原后分组结构还在
+        let group_id = match item.group.trim() {
+            "" => None,
+            name => match group_ids.get(name) {
+                Some(id) => Some(*id),
+                None => {
+                    next_group_sort += 1;
+                    let id = sqlx::query_scalar::<_, i64>(
+                        "INSERT INTO groups (name, icon, sort_order) VALUES (?, '', ?) RETURNING id",
+                    )
+                    .bind(name)
+                    .bind(next_group_sort)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| ServerFnError::new(format!("创建分组失败: {e}")))?;
+                    group_ids.insert(name.to_string(), id);
+                    Some(id)
+                }
+            },
+        };
+
         next_sort += 1;
 
         sqlx::query(
-            "INSERT INTO bookmarks (title, url, description, tags, sort_order) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO bookmarks (title, url, description, tags, group_id, sort_order) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(if title.is_empty() { url.clone() } else { title })
         .bind(&url)
         .bind(item.description.trim())
         .bind(normalize_tags(&item.tags))
+        .bind(group_id)
         .bind(next_sort)
         .execute(&mut *tx)
         .await
@@ -487,7 +949,7 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
     Ok(report)
 }
 
-/// 把全部书签按当前显示顺序导出为 JSON 备份。
+/// 把全部书签（不含回收站）按当前显示顺序导出为 JSON 备份。
 ///
 /// 不是 server function——由 `/export/bookmarks.json` 路由直接调用。
 #[cfg(feature = "server")]
@@ -502,7 +964,26 @@ pub async fn export_bookmarks_json() -> String {
         .await
         .unwrap_or_default();
 
-    let items: Vec<ImportedBookmark> = rows.into_iter().map(ImportedBookmark::from).collect();
+    // 分组写成名字，跨库导入才认得
+    let group_names: std::collections::HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM groups")
+            .fetch_all(db::pool())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+    let items: Vec<ImportedBookmark> = rows
+        .iter()
+        .map(|bookmark| {
+            let name = bookmark
+                .group_id
+                .and_then(|id| group_names.get(&id).cloned())
+                .unwrap_or_default();
+            ImportedBookmark::from_bookmark(bookmark, &name)
+        })
+        .collect();
+
     crate::transfer::to_json(&items)
 }
 
@@ -581,8 +1062,10 @@ mod tests {
                 url         TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 tags        TEXT NOT NULL DEFAULT '',
+                group_id    INTEGER,
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-                sort_order  INTEGER NOT NULL DEFAULT 0
+                sort_order  INTEGER NOT NULL DEFAULT 0,
+                deleted_at  TEXT
             )",
         )
         .execute(&pool)
@@ -590,20 +1073,24 @@ mod tests {
         .expect("create table");
 
         let rows = [
-            ("Rust 官网", "https://rust-lang.org", "系统编程语言", "编程,rust"),
-            ("Dioxus", "https://dioxuslabs.com", "Rust 全栈框架", "rust,web"),
-            ("Hacker News", "https://news.ycombinator.com", "科技新闻", "news"),
-            ("50% off", "https://example.com/sale", "折扣_信息", "shopping"),
+            ("Rust 官网", "https://rust-lang.org", "系统编程语言", "编程,rust", None),
+            ("Dioxus", "https://dioxuslabs.com", "Rust 全栈框架", "rust,web", Some(1)),
+            ("Hacker News", "https://news.ycombinator.com", "科技新闻", "news", None),
+            ("50% off", "https://example.com/sale", "折扣_信息", "shopping", Some(1)),
         ];
-        for (title, url, desc, tags) in rows {
-            sqlx::query("INSERT INTO bookmarks (title, url, description, tags) VALUES (?, ?, ?, ?)")
-                .bind(title)
-                .bind(url)
-                .bind(desc)
-                .bind(tags)
-                .execute(&pool)
-                .await
-                .expect("insert");
+        for (title, url, desc, tags, group_id) in rows {
+            sqlx::query(
+                "INSERT INTO bookmarks (title, url, description, tags, group_id) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(title)
+            .bind(url)
+            .bind(desc)
+            .bind(tags)
+            .bind(group_id)
+            .execute(&pool)
+            .await
+            .expect("insert");
         }
 
         // 与迁移 003 一致的回填：升序排 sort_order 等价于原来的 id 降序
@@ -689,5 +1176,49 @@ mod tests {
 
         let ids: Vec<i64> = run(&pool, "").await.iter().map(|b| b.id).collect();
         assert_eq!(ids, vec![1, 3, 2, 4]);
+    }
+
+    #[tokio::test]
+    async fn soft_deleted_rows_are_excluded() {
+        let pool = seed().await;
+
+        sqlx::query("UPDATE bookmarks SET deleted_at = datetime('now') WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let ids: Vec<i64> = run(&pool, "").await.iter().map(|b| b.id).collect();
+        assert_eq!(ids, vec![4, 3, 1], "删除的不该出现在列表里");
+        // 但按关键词也搜不到它
+        assert_eq!(run(&pool, "dioxus").await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn group_id_is_returned() {
+        let pool = seed().await;
+        let items = run(&pool, "").await;
+        let dioxus = items.iter().find(|b| b.title == "Dioxus").unwrap();
+        assert_eq!(dioxus.group_id, Some(1));
+        let rust = items.iter().find(|b| b.title == "Rust 官网").unwrap();
+        assert_eq!(rust.group_id, None, "未分组是 NULL");
+    }
+
+    #[test]
+    fn tags_normalize_and_merge() {
+        assert_eq!(normalize_tags(" rust , web ,, "), "rust,web");
+        assert_eq!(normalize_tags("rust,rust,web"), "rust,web", "重复项去掉");
+        assert_eq!(merge_tags("rust", "web, rust"), "rust,web");
+        assert_eq!(merge_tags("", "a,b"), "a,b");
+        assert_eq!(drop_tags("a,b,c", "b"), "a,c");
+        assert_eq!(drop_tags("a,b", "x"), "a,b", "删不存在的标签是空操作");
+        assert_eq!(drop_tags("a,b", "a,b"), "");
+    }
+
+    #[test]
+    fn prefixes_are_sanitized() {
+        assert_eq!(normalize_prefix(" GH "), "gh");
+        assert_eq!(normalize_prefix("b-i-n-g"), "b-i-n-g");
+        assert_eq!(normalize_prefix("a b/c"), "abc");
+        assert_eq!(normalize_prefix("   "), "");
     }
 }

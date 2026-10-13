@@ -39,6 +39,8 @@ services:
       IP: 0.0.0.0
       PORT: "8080"
       DATABASE_URL: "sqlite:///data/mtab.db?mode=rwc"
+      # 图标缓存也放进挂载卷，否则容器重建后要重新代取一遍
+      ICON_DIR: "/data/icon"
     restart: unless-stopped
     # 运行镜像里没有 curl/wget，用 bash 的 /dev/tcp 做 TCP 探活即可。
     healthcheck:

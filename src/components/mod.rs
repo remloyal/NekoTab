@@ -1,3 +1,4 @@
+mod batch;
 mod bookmark_form;
 mod bookmark_grid;
 mod clock;
@@ -6,13 +7,17 @@ mod context_menu;
 mod drawer;
 mod engine_logo;
 mod engine_settings;
+mod group_settings;
+mod group_tabs;
 mod icon_tile;
 mod modal;
+mod pager;
 mod quote;
 mod search_bar;
 mod settings_panel;
-mod tag_tabs;
+mod trash_panel;
 
+pub use batch::{BatchMoveList, BatchTagForm};
 pub use bookmark_form::BookmarkForm;
 pub use bookmark_grid::BookmarkGrid;
 pub use clock::Clock;
@@ -20,9 +25,12 @@ pub use confirm_dialog::ConfirmDialog;
 pub use context_menu::ContextMenu;
 pub use drawer::Drawer;
 pub use engine_settings::EngineSettings;
+pub use group_tabs::{
+    build_tabs, group_value, parse_filter, Filter, GroupTabs, GROUP_UNGROUPED,
+};
 pub use icon_tile::IconTile;
 pub use modal::Modal;
+pub use pager::Pager;
 pub use quote::QuoteLine;
-pub use search_bar::SearchBar;
+pub use search_bar::{SearchBar, SearchMode, SEARCH_INPUT_ID};
 pub use settings_panel::SettingsPanel;
-pub use tag_tabs::TagTabs;

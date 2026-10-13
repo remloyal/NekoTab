@@ -2508,6 +2508,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tower-http",
+ "wasm-bindgen",
  "web-sys",
 ]
 

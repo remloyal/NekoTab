@@ -4,8 +4,12 @@ mod backend;
 mod components;
 #[cfg(feature = "server")]
 mod db;
+mod dom;
 mod engine;
 mod favicon;
+// 农历（含第几天/第几周）只被客户端时钟用到，服务端编译时整体未被引用
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+mod lunar;
 mod models;
 mod pages;
 mod routes;
@@ -16,11 +20,21 @@ mod transfer;
 use routes::Route;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+const FAVICON_SVG: Asset = asset!("/assets/favicon.svg");
+
+/// 浏览器主题色（移动端地址栏）
+const THEME_COLOR: &str = "#0b0d13";
 
 #[component]
 fn App() -> Element {
     rsx! {
         document::Stylesheet { href: MAIN_CSS }
+
+        // 站点自身的图标。之前 head 里什么都没有，标签页显示的是浏览器默认图标。
+        document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON_SVG.to_string() }
+        document::Meta { name: "theme-color", content: THEME_COLOR }
+        document::Meta { name: "description", content: "极简自部署书签导航" }
+
         Router::<Route> {}
     }
 }
@@ -59,6 +73,13 @@ fn main() {
             db::init_pool(&database_url)
                 .await
                 .expect("初始化数据库失败");
+
+            // 图标字节写在磁盘上（`ICON_DIR`，默认 data/icon），库表只留元数据。
+            // 建不出来也不致命：代取到的图标会直接回给浏览器，只是不落缓存。
+            match favicon::init_icon_dir() {
+                Ok(dir) => println!("[mtab] 图标目录: {}", dir.display()),
+                Err(e) => eprintln!("[mtab] 图标目录创建失败，图标将不落盘: {e}"),
+            }
 
             // 手工注册的路由优先于 SSR 兜底
             let router = dioxus::server::router(App)

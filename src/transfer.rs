@@ -107,6 +107,10 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
                         url: href,
                         description: String::new(),
                         tags: folders.join(","),
+                        // 浏览器 HTML 里的文件夹路径只进标签：嵌套路径没有唯一的分组
+                        // 归属，硬套成"分组"会随不同浏览器/不同层级产生一堆碎分组。
+                        // 分组只在自家 JSON 备份里往返（写的是分组名）。
+                        group: String::new(),
                     });
                 }
             }
@@ -328,6 +332,38 @@ mod tests {
         let json = to_json(&items);
         let back = parse_json(&json).expect("解析自身备份");
         assert_eq!(items, back);
+    }
+
+    #[test]
+    fn json_round_trip_keeps_groups() {
+        let items = vec![ImportedBookmark {
+            title: "GitHub".to_string(),
+            url: "https://github.com".to_string(),
+            description: "代码托管".to_string(),
+            tags: "dev".to_string(),
+            group: "开发".to_string(),
+        }];
+
+        let back = parse_json(&to_json(&items)).expect("解析自身备份");
+        assert_eq!(back, items);
+        assert_eq!(back[0].group, "开发");
+    }
+
+    #[test]
+    fn missing_group_field_defaults_to_empty() {
+        // 旧版本的备份没有 group 字段，必须仍能导入
+        let back = parse_json(r#"[{"title":"A","url":"https://a.com"}]"#).expect("解析旧备份");
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].group, "");
+    }
+
+    #[test]
+    fn netscape_folders_do_not_become_groups() {
+        let items = parse_netscape(SAMPLE);
+        assert!(
+            items.iter().all(|item| item.group.is_empty()),
+            "浏览器 HTML 的文件夹只进标签"
+        );
     }
 
     #[test]

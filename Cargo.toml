@@ -41,14 +41,36 @@ tower-http = { version = "0.6", optional = true, default-features = false, featu
     "compression-br",
 ] }
 
-# ---- 仅 web（wasm）编译：首页时钟、搜索跳转 ----
+# ---- 仅 web（wasm）编译：时钟、农历、搜索跳转、指针拖拽、文件读取 ----
 gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
 js-sys = { version = "0.3", optional = true }
-web-sys = { version = "0.3", optional = true, features = ["Window"] }
+# wasm-bindgen 本就随 dioxus/web 进了依赖树，这里只是显式声明以便直接用
+# `Closure` / `JsCast`（文件读取的回调、DOM 事件的 downcast 需要）。
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "FileList",
+    "File",
+    "FileReader",
+    "Blob",
+    "Event",
+    "EventTarget",
+    "ProgressEvent",
+] }
 
 [features]
 default = []
-web = ["dioxus/web", "dep:gloo-timers", "dep:js-sys", "dep:web-sys"]
+web = [
+    "dioxus/web",
+    "dep:gloo-timers",
+    "dep:js-sys",
+    "dep:wasm-bindgen",
+    "dep:web-sys",
+]
 server = [
     "dioxus/server",
     "dep:sqlx",

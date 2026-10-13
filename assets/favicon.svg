@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="mtab-lite 书签导航">
+  <defs>
+    <linearGradient id="mtab" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6aa9ff"/>
+      <stop offset="1" stop-color="#7a5bff"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#mtab)"/>
+  <!-- 书签飘带：底边中央一个 V 形缺口 -->
+  <path d="M22 14 H42 V51 L32 44 L22 51 Z" fill="#fff"/>
+</svg>

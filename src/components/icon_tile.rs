@@ -35,24 +35,40 @@ fn safe_href(url: &str) -> String {
 #[cfg(feature = "web")]
 const LONG_PRESS_MS: u32 = 500;
 
-/// 长按判定：手指/鼠标位移超过该像素数就当作滑动，取消长按。
+/// 位移超过该像素数就当作"滑动"，不再算长按（或点击）。
 const MOVE_TOLERANCE: f64 = 8.0;
 
 /// 单个书签图标块。
 ///
-/// 普通态：点击新窗口打开，右键呼出菜单。
-/// 编辑态（`editing`）：显示 ✕ 删除角标与拖拽手柄，点击改为打开修改弹窗，
-/// 并可用 HTML5 拖拽重排。
+/// - 普通态：点击打开（新标签页或当前页，由设置决定），右键呼出菜单；
+/// - 编辑态：可拖拽排序（鼠标与触屏都走 Pointer Events），点击打开修改弹窗，
+///   右上角 ✕ 删除；
+/// - 选择态：点击切换选中，配合底栏做批量删除 / 打标签 / 移动分组。
+///
+/// 拖拽的判定与落点计算都在父级 `BookmarkGrid` 里：它同时是"网格内的公共祖先"，
+/// 因此无论指针捕获成功与否，指针移动都能冒泡到它。这里只负责按下时把坐标报上去。
 #[component]
+#[allow(clippy::too_many_arguments)]
 pub fn IconTile(
     bookmark: Bookmark,
     editing: bool,
+    selecting: bool,
+    selected: bool,
+    /// 自己正被拖动
+    dragging: bool,
+    /// 自己被拖到了头上（落点提示）
+    drag_over: bool,
+    /// 刚刚发生过拖拽，这次的 click 不该被当成点击
+    suppress_click: bool,
+    /// 打开方式：true 开新标签页
+    new_tab: bool,
     on_context: EventHandler<(f64, f64)>,
     on_enter_edit: EventHandler<()>,
     on_edit: EventHandler<Bookmark>,
     on_delete: EventHandler<Bookmark>,
-    on_drag_start: EventHandler<i64>,
-    on_drop_on: EventHandler<i64>,
+    on_toggle_select: EventHandler<i64>,
+    /// 编辑态按下的坐标（拖拽起点）
+    on_pointer_down: EventHandler<(f64, f64)>,
 ) -> Element {
     let (initial, hue) = icon_of(&bookmark);
     let tooltip = if bookmark.description.is_empty() {
@@ -61,7 +77,6 @@ pub fn IconTile(
         bookmark.description.clone()
     };
     let id = bookmark.id;
-    let draggable = editing;
 
     // 取不到站点图标时回退到首字块
     let mut icon_failed = use_signal(|| false);
@@ -71,24 +86,52 @@ pub fn IconTile(
     // 长按检测：按下时的坐标 + 递增令牌（令牌变了就说明这次按下已作废）
     let mut press_origin = use_signal(|| Option::<(f64, f64)>::None);
     let mut press_token = use_signal(|| 0u32);
-    let mut drag_over = use_signal(|| false);
+
+    let is_edit = editing && !selecting;
+
+    let class = {
+        let mut class = String::from("tile");
+        if selected {
+            class.push_str(" tile-selected");
+        }
+        if dragging {
+            class.push_str(" tile-dragging");
+        }
+        if drag_over {
+            class.push_str(" drag-over");
+        }
+        class
+    };
 
     rsx! {
         a {
-            class: if drag_over() { "tile drag-over" } else { "tile" },
+            class: "{class}",
+            // 拖拽完全交给 Pointer Events：HTML5 原生拖放在触屏上不触发，
+            // 而且 <a> 的默认拖拽会把链接地址当成拖拽数据，两者会打架。
+            "data-bookmark-id": "{id}",
             href: safe_href(&bookmark.url),
-            target: "_blank",
+            target: if new_tab { "_blank" } else { "_self" },
             rel: "noopener noreferrer",
             title: "{tooltip}",
-            draggable: if draggable { "true" } else { "false" },
+            draggable: "false",
 
             onpointerdown: move |evt| {
-                if editing {
+                let coords = evt.client_coordinates();
+
+                if is_edit {
+                    // 尽力把指针捕获到这张卡片上（拖出网格也能继续跟踪）。
+                    // 捕获失败也无所谓：移动事件仍会从下方的元素冒泡到网格。
+                    let _ = crate::dom::capture_pointer(&evt);
+                    on_pointer_down.call((coords.x, coords.y));
                     return;
                 }
-                let coords = evt.client_coordinates();
-                press_origin.set(Some((coords.x, coords.y)));
 
+                if selecting {
+                    return;
+                }
+
+                // 普通态：长按进入编辑态
+                press_origin.set(Some((coords.x, coords.y)));
                 let token = press_token() + 1;
                 press_token.set(token);
 
@@ -104,20 +147,25 @@ pub fn IconTile(
                     }
                 });
             },
+
             onpointermove: move |evt| {
+                if is_edit {
+                    return;
+                }
+                // 普通态：位移超过阈值即判定为滑动，放弃长按
                 if let Some((origin_x, origin_y)) = press_origin() {
                     let coords = evt.client_coordinates();
                     if (coords.x - origin_x).abs() > MOVE_TOLERANCE
                         || (coords.y - origin_y).abs() > MOVE_TOLERANCE
                     {
-                        // 判定为滑动，放弃长按
                         press_origin.set(None);
                     }
                 }
             },
+
             onpointerup: move |_| press_origin.set(None),
-            onpointerleave: move |_| press_origin.set(None),
             onpointercancel: move |_| press_origin.set(None),
+            onpointerleave: move |_| press_origin.set(None),
 
             oncontextmenu: move |evt| {
                 evt.prevent_default();
@@ -127,10 +175,22 @@ pub fn IconTile(
                 on_context.call((coords.x, coords.y));
             },
 
-            // 编辑态点击改为打开修改弹窗，不再跳转
             onclick: {
                 let target = bookmark.clone();
                 move |evt| {
+                    if suppress_click {
+                        // 刚拖完，这次 click 是拖拽的尾巴
+                        evt.prevent_default();
+                        return;
+                    }
+
+                    if selecting {
+                        evt.prevent_default();
+                        on_toggle_select.call(target.id);
+                        return;
+                    }
+
+                    // 编辑态点击改为打开修改弹窗，不再跳转
                     if editing {
                         evt.prevent_default();
                         evt.stop_propagation();
@@ -139,29 +199,13 @@ pub fn IconTile(
                 }
             },
 
-            ondragstart: move |evt| {
-                // 有些浏览器要求 drag 必须带数据才算有效拖拽
-                let _ = evt.data_transfer().set_data("text/plain", &id.to_string());
-                on_drag_start.call(id);
-            },
-            ondragover: move |evt| {
-                if draggable {
-                    evt.prevent_default();
-                    drag_over.set(true);
+            if selecting {
+                span {
+                    class: if selected { "tile-pick picked" } else { "tile-pick" },
+                    title: if selected { "取消选择" } else { "选择" },
+                    if selected { "✓" }
                 }
-            },
-            ondragleave: move |_| drag_over.set(false),
-            ondrop: move |evt| {
-                if draggable {
-                    evt.prevent_default();
-                    evt.stop_propagation();
-                    drag_over.set(false);
-                    on_drop_on.call(id);
-                }
-            },
-            ondragend: move |_| drag_over.set(false),
-
-            if editing {
+            } else if editing {
                 span {
                     class: "tile-del",
                     title: "删除该书签",
@@ -175,9 +219,7 @@ pub fn IconTile(
                     },
                     "✕"
                 }
-                if editing {
-                    span { class: "tile-grip", title: "拖动调整位置", "⠿" }
-                }
+                span { class: "tile-grip", title: "按住拖动调整位置", "⠿" }
             }
 
             div {

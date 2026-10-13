@@ -15,6 +15,7 @@ pub fn EngineSettings(
     let mut name = use_signal(String::new);
     let mut url = use_signal(String::new);
     let mut icon = use_signal(String::new);
+    let mut prefix = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 
@@ -27,6 +28,7 @@ pub fn EngineSettings(
             name: name(),
             url: url(),
             icon: icon(),
+            prefix: prefix(),
         };
 
         spawn(async move {
@@ -38,6 +40,7 @@ pub fn EngineSettings(
                     name.set(String::new());
                     url.set(String::new());
                     icon.set(String::new());
+                    prefix.set(String::new());
                     busy.set(false);
                     on_added.call(());
                 }
@@ -84,6 +87,20 @@ pub fn EngineSettings(
                     placeholder: "留空则用名称首字",
                     value: "{icon}",
                     oninput: move |e| icon.set(e.value()),
+                }
+            }
+
+            label { class: "field",
+                span { class: "field-label", "搜索前缀（可选）" }
+                input {
+                    class: "input",
+                    placeholder: "如 gh，则输入「gh rust」用本引擎搜 rust",
+                    value: "{prefix}",
+                    oninput: move |e| prefix.set(e.value()),
+                }
+                p { class: "field-hint",
+                    "只留字母、数字与连字符，会自动转小写。前缀必须单独成段（后面跟空格才生效），"
+                    "因此不会把「github」误当成前缀「gh」。"
                 }
             }
 
@@ -134,6 +151,9 @@ pub fn EngineSettings(
 
                     {engine_logo(&engine)}
                     span { class: "engine-card-name", "{engine.name}" }
+                    if !engine.prefix.is_empty() {
+                        code { class: "engine-prefix", "{engine.prefix}" }
+                    }
                 }
             }
         }

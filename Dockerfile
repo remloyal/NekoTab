@@ -50,6 +50,7 @@ WORKDIR /app
 COPY --from=builder /app/target/dx/mtab-lite/release/web/ /app/
 
 ENV DATABASE_URL="sqlite:///data/mtab.db?mode=rwc" \
+    ICON_DIR="/data/icon" \
     IP=0.0.0.0 \
     PORT=8080
 
