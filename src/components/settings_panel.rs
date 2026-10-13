@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use super::group_settings::GroupSettings;
 use super::trash_panel::TrashPanel;
-use crate::backend::{error_text, import_bookmarks, save_settings};
+use crate::backend::{clear_icon_cache, error_text, import_bookmarks, save_settings};
 use crate::models::{Group, ImportReport, Settings, BACKGROUND_PRESETS, THEMES};
 
 /// 文件选择器的 id，读文件时靠它取到 `<input type="file">`。
@@ -70,6 +70,8 @@ pub fn SettingsPanel(
     let mut importing = use_signal(|| false);
     let mut import_error = use_signal(|| Option::<String>::None);
     let mut import_report = use_signal(|| Option::<ImportReport>::None);
+    let mut clearing_icons = use_signal(|| false);
+    let mut icon_clear_msg = use_signal(|| Option::<String>::None);
 
     let section = active();
 
@@ -500,6 +502,44 @@ pub fn SettingsPanel(
                             }
                             if let Some(message) = import_error() {
                                 p { class: "form-error", "{message}" }
+                            }
+                        }
+
+                        section { class: "panel-section",
+                            h3 { class: "panel-heading", "站点图标缓存" }
+                            p { class: "field-hint",
+                                "卡片图标由服务端代取并缓存（字节存在 ICON_DIR，库里只留元数据）。"
+                                "取不到的站点会记一条负缓存，在有效期内不再重试——所以修好网络、"
+                                "或对方站点恢复之后，图标可能仍缺一会儿。清掉缓存即可立刻全部重新代取。"
+                            }
+                            div { class: "form-actions start",
+                                button {
+                                    class: "btn-ghost",
+                                    r#type: "button",
+                                    disabled: clearing_icons(),
+                                    onclick: move |_| {
+                                        spawn(async move {
+                                            clearing_icons.set(true);
+                                            icon_clear_msg.set(None);
+                                            match clear_icon_cache().await {
+                                                Ok(n) => {
+                                                    icon_clear_msg.set(Some(format!(
+                                                        "已清掉 {n} 条记录，重新打开页面或刷新即可看到重新代取的图标"
+                                                    )));
+                                                    clearing_icons.set(false);
+                                                }
+                                                Err(e) => {
+                                                    icon_clear_msg.set(Some(format!("清空失败：{}", error_text(&e))));
+                                                    clearing_icons.set(false);
+                                                }
+                                            }
+                                        });
+                                    },
+                                    if clearing_icons() { "清空中…" } else { "清空图标缓存" }
+                                }
+                                if let Some(msg) = icon_clear_msg() {
+                                    span { class: "field-hint", "{msg}" }
+                                }
                             }
                         }
 
