@@ -1,16 +1,25 @@
 # 单容器应用的 compose 配置。默认直接使用已发布的多架构镜像（Docker Hub）。
 #
+# 固定项目名：否则换部署目录后会被当成新项目，网络/卷另起一套，看起来像「数据没了」。
+name: nekotab
+
 # 常用命令：
 #   docker compose up -d                          # 拉取 remloyal001/nekotab:latest 并启动
 #   docker compose logs -f
 #   docker compose pull && docker compose up -d    # 升级到新镜像
-#   docker compose down                            # 停止（保留数据卷）
-#   docker compose down -v                         # 停止并清空数据
+#   docker compose down                            # 停止（数据保留）
+#
+# 数据用 bind mount 放在宿主目录里，默认是仓库下的 ./data（与本地开发的约定一致），
+# 可用 NEKOTAB_DATA 改成绝对路径，例如：
+#   NEKOTAB_DATA=/srv/nekotab/data docker compose up -d
+# 注意：
+#   * 容器内进程是 root，该目录及其中的文件会归 root 所有。
+#   * 要放在本地磁盘，别放 NFS/SMB 等网络文件系统——SQLite 的 WAL 依赖正常文件锁。
+#   * 目录不存在时 Docker 会自动创建。
 #
 # 说明：
 #   * 监听地址变量是 IP 不是 HOST（由 dioxus-cli-config 读取），详见 README。
 #   * 宿主端口默认 8080，可用 NEKOTAB_PORT 覆盖；本机跑 dx serve 时它会占用 8080。
-#   * 数据落在命名卷 nekotab-data 的 /data 下，容器重建不丢。
 #
 #   想改成「用本机打包的产物构建镜像」（不经过 Docker Hub）：
 #     bash scripts/pack-linux.sh        # 产物在 dist/amd64（arm64 则是 dist/arm64）
@@ -25,7 +34,7 @@ services:
     ports:
       - "${NEKOTAB_PORT:-8080}:8080"
     volumes:
-      - nekotab-data:/data
+      - "${NEKOTAB_DATA:-./data}:/data"
     environment:
       IP: 0.0.0.0
       PORT: "8080"
@@ -38,6 +47,3 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
-
-volumes:
-  nekotab-data:
