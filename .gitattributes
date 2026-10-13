@@ -1,15 +1,9 @@
-# 统一在这里声明换行策略，不要依赖各机器上的 core.autocrlf ——
-# 那是本机配置、不进仓库，换台机器或换个人就可能把 CRLF 提交进来。
-* text=auto
-
-# migrations/*.sql 必须 LF：sqlx 的迁移校验和是**按文件字节**算的，
-# 同一份迁移被检出成 CRLF 后会被判成"迁移已被修改"，服务端直接起不来。
-*.sql        text eol=lf
-
-# shell 脚本一律用 LF。本机 core.autocrlf=true，若被检出成 CRLF，
-# 在 WSL / Linux 里执行会报 "\r: command not found"。
-*.sh         text eol=lf
-
-# Dockerfile 也要 LF：换行符会影响行继续符（\）的解析，
-# 而且构建上下文用的是工作区文件，不只是仓库里的 blob。
-Dockerfile*  text eol=lf
+# 一行覆盖全部：auto 负责判断哪些是文本（二进制不会被改），eol=lf 固定检出为 LF。
+#
+# 为什么必须带 eol=lf：只写 `* text=auto` 的话，工作区换行由各机器的
+# core.autocrlf 决定（本机是 true，会检出成 CRLF）。而 migrations/*.sql 的迁移
+# 校验和是按文件字节算的 —— 换行一变，服务端就会报
+# "migration was previously applied but has been modified" 拒绝启动。
+#
+# 若以后新增 .bat / .cmd 这类 Windows 专用脚本，给它们单独配 eol=crlf。
+* text=auto eol=lf
