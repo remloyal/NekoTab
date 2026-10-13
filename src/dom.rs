@@ -171,64 +171,45 @@ pub fn now_ms() -> f64 {
     0.0
 }
 
-/// 读取 `<input type="file">` 里选中的第一个文件的文本内容。
+/// 装上 panic 钩子。
 ///
-/// 用 `FileReader.readAsText` 而不是 `Blob::text()`：后者的 Promise 要在 wasm 里
-/// 接一个 async 运行时，而这里只需要一个回调。
-///
-/// 回调在读取完成（或失败）后触发一次；失败时参数为 `None`。
+/// release 构建开了 `panic = "abort"`，wasm 里任何 panic 都只会变成一个
+/// `RuntimeError: unreachable`，浏览器控制台上连一句话都没有——出问题时只能靠猜。
+/// 钩子在 abort 之前执行，把消息与位置打成一行错误，并写进一个固定 id 的 DOM 节点：
+/// 应用崩死之后这个节点还在，从外部（比如自动化、用户截图）也能读到现场。
 #[cfg(feature = "web")]
-pub fn read_selected_file_text<F>(input_id: &str, on_done: F)
-where
-    F: FnOnce(Option<String>) + 'static,
-{
-    use wasm_bindgen::closure::Closure;
-    use wasm_bindgen::JsCast;
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let message = format!("[mtab] panic: {info}");
+        web_sys::console::error_1(&message.as_str().into());
 
-    let Some(input) = document()
-        .and_then(|doc| doc.get_element_by_id(input_id))
-        .and_then(|el| el.dyn_into::<web_sys::HtmlInputElement>().ok())
-    else {
-        on_done(None);
-        return;
-    };
+        if let Some(document) = document() {
+            let node = document
+                .get_element_by_id("mtab-panic")
+                .or_else(|| {
+                    let node = document.create_element("div").ok()?;
+                    let _ = node.set_attribute(
+                        "style",
+                        "position:fixed;left:0;bottom:0;z-index:9999;max-width:100vw;\
+                         padding:6px 10px;font:12px/1.5 monospace;color:#fff;\
+                         background:rgba(180,30,30,.92);white-space:pre-wrap;",
+                    );
+                    document.body()?.append_child(&node).ok()?;
+                    Some(node)
+                });
 
-    let Some(file) = input.files().and_then(|files| files.get(0)) else {
-        on_done(None);
-        return;
-    };
-
-    let reader = match web_sys::FileReader::new() {
-        Ok(reader) => reader,
-        Err(_) => {
-            on_done(None);
-            return;
+            if let Some(node) = node {
+                let _ = node.set_attribute("id", "mtab-panic");
+                node.set_text_content(Some(&message));
+            }
         }
-    };
-
-    // `once_into_js` 正好对上 onload 只触发一次的语义：既能消费 on_done，
-    // 也不会像 `forget` 那样把闭包永久泄漏在 JS 堆上。
-    let reader_for_callback = reader.clone();
-    let onload = Closure::once_into_js(move || {
-        let text = reader_for_callback
-            .result()
-            .ok()
-            .and_then(|value| value.as_string());
-        on_done(text);
-    });
-    reader.set_onload(Some(onload.unchecked_ref()));
-
-    // `read_as_text` 失败时 onload 不会触发，也就没有回调——调用方表现为"没反应"。
-    // 这是文件选择本身出了问题，属于用户可恢复的操作，不必 panic。
-    let _ = reader.read_as_text(&file);
+    }));
 }
 
 #[cfg(not(feature = "web"))]
-pub fn read_selected_file_text<F>(_input_id: &str, _on_done: F)
-where
-    F: FnOnce(Option<String>) + 'static,
-{
-}
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+pub fn install_panic_hook() {}
+
 
 #[cfg(feature = "web")]
 fn document() -> Option<web_sys::Document> {

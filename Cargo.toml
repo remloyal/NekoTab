@@ -41,25 +41,23 @@ tower-http = { version = "0.6", optional = true, default-features = false, featu
     "compression-br",
 ] }
 
-# ---- 仅 web（wasm）编译：时钟、农历、搜索跳转、指针拖拽、文件读取 ----
+# ---- 仅 web（wasm）编译：时钟、农历、搜索跳转、指针拖拽、panic 现场 ----
 gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
 js-sys = { version = "0.3", optional = true }
 # wasm-bindgen 本就随 dioxus/web 进了依赖树，这里只是显式声明以便直接用
-# `Closure` / `JsCast`（文件读取的回调、DOM 事件的 downcast 需要）。
+# `JsCast`（DOM 事件的 downcast、元素类型转换需要）。
 wasm-bindgen = { version = "0.2", optional = true }
+# 读本地文件走 document::eval + FileReader（在 JS 里），因此不需要 web-sys 的
+# File / FileList / FileReader / Blob 这些绑定。
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Document",
     "Element",
     "HtmlElement",
     "HtmlInputElement",
-    "FileList",
-    "File",
-    "FileReader",
-    "Blob",
     "Event",
     "EventTarget",
-    "ProgressEvent",
+    "console",
 ] }
 
 [features]

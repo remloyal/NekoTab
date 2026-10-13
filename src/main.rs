@@ -111,5 +111,10 @@ fn main() {
 
     // 客户端（wasm）：hydrate 已有的 SSR 输出。
     #[cfg(not(feature = "server"))]
-    dioxus::launch(App);
+    {
+        // 先装 panic 钩子再启动：release 下 panic 只会变成 unreachable，
+        // 没有钩子的话控制台上什么都看不到
+        dom::install_panic_hook();
+        dioxus::launch(App);
+    }
 }

@@ -271,8 +271,18 @@ dioxus 的解释器在把 `style` 设成空串时，会把「之前设过、现�
 仍然完整写进标签，所以信息没有丢——搜索照样命中。JSON 备份按里面的分组名还原
 （导出写分组名，导入按名字对应，不存在就建）。
 
-文件读取走 `<input type="file">` 加 `FileReader`（`src/dom.rs`），
-拿到的文本与粘贴走同一条提交路径。
+文件读取走 `<input type="file">`，但**不把 FileReader 的回调直接接回 Rust**：
+那段 JS 交给 `document::eval` 跑，读到的文本通过 `dioxus.send` 发回来，之后所有
+动作都在 `onchange` 事件触发的那次 `spawn` 里做。这里踩过一个坑——原生 JS 回调
+不在任何 Dioxus 作用域里，在其中写 signal 或调用 `spawn`，会让 dioxus-core 取
+「当前作用域」时 `unwrap` 到 `None` 直接 panic；release 下 `panic = "abort"`，
+于是整个页面死掉，现象只有控制台一句 `RuntimeError: unreachable`。
+这条约束对任何 wasm 应用都成立：**原生 JS 回调里只该碰不依赖运行时状态的东西**。
+
+**装了 panic 钩子。** 同样是 `panic = "abort"` 的后果：wasm 里 panic 只会变成一个
+没有信息的 `unreachable`。钩子在 abort 之前把消息与位置打成一行 `console.error`，
+并写进一个固定 id 的 DOM 节点（`#mtab-panic`）——应用崩死之后那个节点还在，
+从外部也能读到现场。上面那个坑就是靠它定位到 `runtime.rs:223` 的。
 
 **分组图标塞进原来的 `icon` 字段，不新增表结构。** 图标值有三种形态：
 `i:code`（内置图标）、`http…`（图片地址）、空串（名称首字）。内置图标是自己画的

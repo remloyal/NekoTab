@@ -8,6 +8,31 @@ use crate::models::{Group, ImportReport, Settings, BACKGROUND_PRESETS, THEMES};
 /// 文件选择器的 id，读文件时靠它取到 `<input type="file">`。
 const IMPORT_FILE_ID: &str = "mtab-import-file";
 
+/// 读取所选文件的脚本（交给 `document::eval` 跑）。
+///
+/// **这里只允许调用 `dioxus.send`**——它是 Dioxus 提供的通道。绝不能在其中碰
+/// Dioxus 的运行时 API（写 signal、`spawn`、调事件处理器）：这些都要取
+/// 「当前作用域」，而原生 JS 回调不在任何作用域里，dioxus-core 会
+/// `scope_stack.last().unwrap()` 直接 panic；release 下 `panic = "abort"`，
+/// 于是整个页面死掉（现象是控制台一句 `RuntimeError: unreachable`，界面再也不响应）。
+///
+/// 早先的实现正是踩了这个坑：用 wasm-bindgen 的 `Closure` 直接回调 Rust，
+/// 在回调里写 signal 并调用 `spawn`，一选文件就崩。现在读到的文本只是发回来，
+/// 后续所有动作都在 `onchange` 事件触发的那次 `spawn` 里做（task 轮询时
+/// Dioxus 会把作用域压在栈上，见 dioxus-core `tasks.rs`）。
+const READ_FILE_SCRIPT: &str = r#"
+const input = document.getElementById('mtab-import-file');
+const file = input && input.files && input.files[0];
+if (!file) {
+    dioxus.send(null);
+} else {
+    const reader = new FileReader();
+    reader.onload = () => dioxus.send(String(reader.result ?? ''));
+    reader.onerror = () => dioxus.send(null);
+    reader.readAsText(file);
+}
+"#;
+
 /// 设置面板的分区。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -68,6 +93,7 @@ pub fn SettingsPanel(
     let mut import_text = use_signal(String::new);
     let mut import_name = use_signal(String::new);
     let mut importing = use_signal(|| false);
+    let mut reading_file = use_signal(|| false);
     let mut import_error = use_signal(|| Option::<String>::None);
     let mut import_report = use_signal(|| Option::<ImportReport>::None);
     let mut clearing_icons = use_signal(|| false);
@@ -135,13 +161,31 @@ pub fn SettingsPanel(
     };
 
     let pick_file = move |_| {
-        crate::dom::read_selected_file_text(IMPORT_FILE_ID, move |text| match text {
-            Some(text) => {
-                import_name.set("已读取文件，正在导入…".to_string());
-                // 文件选择本身就是明确动作，不必再点一次按钮
-                run_import(text);
+        if importing() || reading_file() {
+            return;
+        }
+
+        // 这一次 spawn 是安全的：它由 onchange 事件触发，作用域正常。
+        // 读文件本身交给 document::eval，JS 里只做 dioxus.send。
+        spawn(async move {
+            reading_file.set(true);
+            import_error.set(None);
+            import_report.set(None);
+
+            let mut eval = document::eval(READ_FILE_SCRIPT);
+            let text = eval.recv::<Option<String>>().await.ok().flatten();
+            reading_file.set(false);
+
+            match text {
+                Some(text) if !text.trim().is_empty() => {
+                    import_name.set("已读取文件，正在导入…".to_string());
+                    run_import(text);
+                }
+                _ => {
+                    import_name.set(String::new());
+                    import_error.set(Some("读取文件失败，或没有选择文件".to_string()));
+                }
             }
-            None => import_error.set(Some("读取文件失败，或没有选择文件".to_string())),
         });
     };
 
@@ -455,7 +499,7 @@ pub fn SettingsPanel(
                                     label {
                                         class: "btn-ghost file-btn",
                                         r#for: IMPORT_FILE_ID,
-                                        "选择文件"
+                                        if reading_file() { "读取中…" } else { "选择文件" }
                                         input {
                                             id: IMPORT_FILE_ID,
                                             class: "visually-hidden",
