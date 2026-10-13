@@ -46,10 +46,51 @@ pub fn to_json(items: &[ImportedBookmark]) -> String {
         .unwrap_or_else(|_| "{\"bookmarks\":[]}".to_string())
 }
 
+/// 浏览器导出时把所有书签包在一个容器文件夹里，它只表示"放在哪个容器"，
+/// 不表达用户的分类意图。导入时跳过它，否则整个标签栏只剩一个「书签栏」。
+const CONTAINER_FOLDERS: [&str; 16] = [
+    // 中文浏览器
+    "书签栏",
+    "收藏夹栏",
+    "收藏夹",
+    "书签菜单",
+    "其他书签",
+    "其它书签",
+    "移动设备书签",
+    "手机书签",
+    // 英文浏览器
+    "bookmarks bar",
+    "bookmarks toolbar",
+    "favorites bar",
+    "bookmarks menu",
+    "other bookmarks",
+    "favorites",
+    "mobile bookmarks",
+    "bookmarks",
+];
+
+/// 由文件夹路径推出分组名。
+///
+/// 取**第一个非容器文件夹**：那才是用户真正的顶层分类（用整条路径当分组名的话，
+/// 层层嵌套会拼出一堆长名字；用最内层的话，「工作/项目A」和「工作/项目B」会
+/// 变成两个平级分组、看不出共同的上层）。更深层级的路径仍然写进标签，
+/// 所以信息没有丢——搜索照样能命中。
+fn group_from_folders(folders: &[String]) -> String {
+    folders
+        .iter()
+        .find(|folder| {
+            !CONTAINER_FOLDERS
+                .iter()
+                .any(|container| folder.eq_ignore_ascii_case(container))
+        })
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// 解析浏览器导出的 Netscape 书签 HTML。
 ///
 /// 只认三类东西：`<H3>` 文件夹名、`<A HREF>` 书签、`<DD>` 描述；
-/// `<DL>` / `</DL>` 用于维护文件夹栈，从而把嵌套路径变成标签。
+/// `<DL>` / `</DL>` 用于维护文件夹栈，从而把嵌套路径变成标签与分组。
 pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
     let mut out: Vec<ImportedBookmark> = Vec::new();
     let mut folders: Vec<String> = Vec::new();
@@ -99,20 +140,18 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
                 let title = decode_entities(&rest[..start]).trim().to_string();
                 rest = &rest[start + len..];
 
-                // 解析器只负责忠实提取；URL 是否可用由导入环节判定，
-                // 这样"跳过 N 条"的口径才和源文件对得上。
-                if !href.trim().is_empty() {
-                    out.push(ImportedBookmark {
-                        title: if title.is_empty() { href.clone() } else { title },
-                        url: href,
-                        description: String::new(),
-                        tags: folders.join(","),
-                        // 浏览器 HTML 里的文件夹路径只进标签：嵌套路径没有唯一的分组
-                        // 归属，硬套成"分组"会随不同浏览器/不同层级产生一堆碎分组。
-                        // 分组只在自家 JSON 备份里往返（写的是分组名）。
-                        group: String::new(),
-                    });
-                }
+                        // 解析器只负责忠实提取；URL 是否可用由导入环节判定，
+                        // 这样"跳过 N 条"的口径才和源文件对得上。
+                        if !href.trim().is_empty() {
+                            out.push(ImportedBookmark {
+                                title: if title.is_empty() { href.clone() } else { title },
+                                url: href,
+                                description: String::new(),
+                                // 完整路径进标签（检索用），首层分类进分组（归属用）
+                                tags: folders.join(","),
+                                group: group_from_folders(&folders),
+                            });
+                        }
             }
         } else if name.eq_ignore_ascii_case("dd") {
             collecting_desc = true;
@@ -357,13 +396,73 @@ mod tests {
         assert_eq!(back[0].group, "");
     }
 
+    /// 浏览器 HTML 的文件夹现在也用来定分组：取第一个非容器文件夹。
     #[test]
-    fn netscape_folders_do_not_become_groups() {
+    fn netscape_folders_become_groups() {
         let items = parse_netscape(SAMPLE);
-        assert!(
-            items.iter().all(|item| item.group.is_empty()),
-            "浏览器 HTML 的文件夹只进标签"
+
+        let github = items.iter().find(|i| i.url == "https://github.com").unwrap();
+        assert_eq!(github.group, "开发工具");
+        assert_eq!(github.tags, "开发工具", "标签仍是完整路径");
+
+        // 嵌套：分组取首层，深层留在标签里
+        let mdn = items
+            .iter()
+            .find(|i| i.url == "https://developer.mozilla.org")
+            .unwrap();
+        assert_eq!(mdn.group, "开发工具", "分组只取顶层，不拼整条路径");
+        assert_eq!(mdn.tags, "开发工具,前端", "深层路径不丢，进标签");
+
+        // 导出根目录下的书签没有分组
+        let rust = items.iter().find(|i| i.url == "https://rust-lang.org").unwrap();
+        assert_eq!(rust.group, "", "根目录下的书签归未分组");
+    }
+
+    /// 浏览器会把所有书签套在一个容器文件夹里（书签栏 / Bookmarks bar…），
+    /// 那不是用户的分类，必须跳过，否则整个标签栏只有一个「书签栏」。
+    #[test]
+    fn skips_browser_container_folders() {
+        let html = r#"<DL><p>
+            <DT><H3>书签栏</H3>
+            <DL><p>
+                <DT><A HREF="https://a.com">A</A>
+                <DT><H3>开发</H3>
+                <DL><p>
+                    <DT><A HREF="https://b.com">B</A>
+                </DL><p>
+            </DL><p>
+            <DT><H3>Other Bookmarks</H3>
+            <DL><p>
+                <DT><A HREF="https://c.com">C</A>
+            </DL><p>
+        </DL><p>"#;
+
+        let items = parse_netscape(html);
+        let by = |url: &str| items.iter().find(|i| i.url == url).unwrap().group.clone();
+
+        assert_eq!(by("https://a.com"), "", "容器下直接放的书签归未分组");
+        assert_eq!(by("https://b.com"), "开发", "容器被跳过，取下层真实分类");
+        assert_eq!(by("https://c.com"), "", "英文容器名同样跳过");
+    }
+
+    /// 容器名大小写不敏感；不是容器的首层照常当分组。
+    #[test]
+    fn container_match_ignores_case_and_keeps_real_first_level() {
+        let items = parse_netscape(
+            r#"<DL><p>
+                <DT><H3>FAVORITES BAR</H3>
+                <DL><p>
+                    <DT><H3>工具</H3>
+                    <DL><p><DT><A HREF="https://x.com">X</A></DL><p>
+                </DL><p>
+            </DL><p>"#,
         );
+        assert_eq!(items[0].group, "工具");
+
+        let plain = parse_netscape(
+            r#"<DL><p><DT><H3>我的收藏</H3><DL><p><DT><A HREF="https://y.com">Y</A></DL><p></DL><p>"#,
+        );
+        assert_eq!(plain[0].group, "我的收藏", "不认识的文件夹名当真实分类");
     }
 
     #[test]

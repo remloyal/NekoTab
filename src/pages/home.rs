@@ -830,6 +830,7 @@ pub fn Home() -> Element {
             if drawer_open() {
                 Drawer {
                     title: "主页设置",
+                    wide: true,
                     on_close: move |_| drawer_open.set(false),
                     SettingsPanel {
                         settings: settings.clone(),

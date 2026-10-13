@@ -10,6 +10,7 @@ mod engine_settings;
 mod group_settings;
 mod group_tabs;
 mod icon_tile;
+pub mod icons;
 mod modal;
 mod pager;
 mod quote;

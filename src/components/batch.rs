@@ -86,7 +86,7 @@ pub fn BatchMoveList(
                     class: "move-item",
                     r#type: "button",
                     onclick: move |_| on_pick.call(None),
-                    span { class: "group-icon group-icon-text", "—" }
+                    span { class: "group-icon group-icon-sm", "—" }
                     span { class: "group-name", "未分组" }
                 }
                 for group in groups {
@@ -98,13 +98,7 @@ pub fn BatchMoveList(
                             let id = group.id;
                             move |_| on_pick.call(Some(id))
                         },
-                        if group.icon.starts_with("http://") || group.icon.starts_with("https://") {
-                            img { class: "group-icon", src: "{group.icon}", alt: "", loading: "lazy" }
-                        } else {
-                            span { class: "group-icon group-icon-text",
-                                "{group.name.chars().next().unwrap_or('?')}"
-                            }
-                        }
+                        {super::icons::group_icon(&group.icon, &group.name, "group-icon-sm")}
                         span { class: "group-name", "{group.name}" }
                     }
                 }

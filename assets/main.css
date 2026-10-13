@@ -511,13 +511,6 @@ body {
     transition: color 0.15s, background 0.15s, opacity 0.15s;
 }
 
-.tab-icon {
-    width: 16px;
-    height: 16px;
-    object-fit: contain;
-    border-radius: 4px;
-}
-
 .tab-count {
     font-size: 11px;
     line-height: 1;
@@ -1356,6 +1349,23 @@ select.input {
     object-fit: contain;
 }
 
+.group-icon-sm {
+    width: 22px;
+    height: 22px;
+    font-size: 11px;
+    border-radius: 6px;
+}
+
+/* 标签栏里的图标不铺底色：16px 的尺寸下色块显得很重，这里让图标跟随文字颜色 */
+.group-icon-xs {
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+    color: inherit;
+    background: none;
+    border-radius: 4px;
+}
+
 .group-name {
     overflow: hidden;
     font-size: 13.5px;
@@ -1596,6 +1606,11 @@ select.input {
     animation: drawer-in 0.22s ease-out;
 }
 
+/* 设置面板：左菜单 + 右内容，比普通抽屉宽得多 */
+.drawer.wide {
+    width: min(820px, 100vw);
+}
+
 @keyframes drawer-in {
     from {
         transform: translateX(24px);
@@ -1641,6 +1656,150 @@ select.input {
     flex: 1;
     padding: 18px;
     overflow-y: auto;
+}
+
+/* ---------- 设置面板：左菜单 + 右内容 ---------- */
+.settings-panes {
+    display: flex;
+    align-items: flex-start;
+    gap: 18px;
+    /* 面板本身不滚，让两栏各自滚——菜单固定可见，内容区独立滚动 */
+    height: 100%;
+    min-height: 0;
+}
+
+.settings-menu {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    gap: 2px;
+    width: 152px;
+    padding-right: 12px;
+    overflow-y: auto;
+    border-right: 1px solid var(--border);
+    /* 与内容区等高，短菜单也铺满，视觉上是完整的一栏 */
+    align-self: stretch;
+}
+
+.settings-menu-item {
+    padding: 9px 12px;
+    font: inherit;
+    font-size: 13.5px;
+    color: var(--text);
+    text-align: left;
+    white-space: nowrap;
+    background: none;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+
+.settings-menu-item:hover {
+    background: var(--hover-soft);
+}
+
+.settings-menu-item.active {
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.settings-content {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    gap: 14px;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    /* 保存条要能贴底，所以内容区是"可滚动 + 底部固定"两段 */
+    padding-right: 4px;
+}
+
+/* 内容区里的第一个分区不再需要顶部留白（原来靠 .panel-section + .panel-section 分隔） */
+.settings-content > .panel-section:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+}
+
+/* 保存条：设置类分区共用，贴在内容区底部 */
+.settings-savebar {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: auto;
+    padding: 12px 0 4px;
+    background: linear-gradient(180deg, transparent, var(--panel-solid-2) 28%);
+}
+
+/* ---------- 分组表单：名称计数 + 图标选择器 ---------- */
+.field-label-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.char-count {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+}
+
+.char-count.over {
+    color: var(--danger);
+}
+
+.icon-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+    gap: 6px;
+    margin-top: 4px;
+    padding: 8px;
+    background: var(--hover-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.icon-cell {
+    display: grid;
+    place-items: center;
+    aspect-ratio: 1;
+    padding: 8px;
+    color: var(--text);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.icon-cell:hover {
+    color: var(--accent);
+    background: var(--hover);
+}
+
+.icon-cell.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.icon-cell-text {
+    font-size: 11px;
+    opacity: 0.75;
+}
+
+.group-icon-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
 }
 
 /* ---------- 设置面板 ---------- */

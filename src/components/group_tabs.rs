@@ -58,7 +58,7 @@ pub fn GroupTabs(tabs: Vec<GroupTab>, active: String, on_select: EventHandler<St
                         move |_| on_select.call(value.clone())
                     },
                     if !tab.icon.is_empty() {
-                        img { class: "tab-icon", src: "{tab.icon}", alt: "", loading: "lazy" }
+                        {super::icons::group_icon(&tab.icon, &tab.label, "group-icon-xs")}
                     }
                     span { class: "tab-name", "{tab.label}" }
                     span { class: "tab-count", "{tab.count}" }
