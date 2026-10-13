@@ -54,7 +54,7 @@ async fn export_bookmarks() -> impl dioxus::server::axum::response::IntoResponse
             (header::CONTENT_TYPE, "application/json; charset=utf-8"),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=\"mtab-bookmarks.json\"",
+                "attachment; filename=\"nekotab-bookmarks.json\"",
             ),
         ],
         body,
@@ -77,8 +77,8 @@ fn main() {
             // 图标字节写在磁盘上（`ICON_DIR`，默认 data/icon），库表只留元数据。
             // 建不出来也不致命：代取到的图标会直接回给浏览器，只是不落缓存。
             match favicon::init_icon_dir() {
-                Ok(dir) => println!("[mtab] 图标目录: {}", dir.display()),
-                Err(e) => eprintln!("[mtab] 图标目录创建失败，图标将不落盘: {e}"),
+                Ok(dir) => println!("[NekoTab] 图标目录: {}", dir.display()),
+                Err(e) => eprintln!("[NekoTab] 图标目录创建失败，图标将不落盘: {e}"),
             }
 
             // 手工注册的路由优先于 SSR 兜底

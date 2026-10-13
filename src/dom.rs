@@ -180,12 +180,12 @@ pub fn now_ms() -> f64 {
 #[cfg(feature = "web")]
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        let message = format!("[mtab] panic: {info}");
+        let message = format!("[NekoTab] panic: {info}");
         web_sys::console::error_1(&message.as_str().into());
 
         if let Some(document) = document() {
             let node = document
-                .get_element_by_id("mtab-panic")
+                .get_element_by_id("nekotab-panic")
                 .or_else(|| {
                     let node = document.create_element("div").ok()?;
                     let _ = node.set_attribute(
@@ -199,7 +199,7 @@ pub fn install_panic_hook() {
                 });
 
             if let Some(node) = node {
-                let _ = node.set_attribute("id", "mtab-panic");
+                let _ = node.set_attribute("id", "nekotab-panic");
                 node.set_text_content(Some(&message));
             }
         }

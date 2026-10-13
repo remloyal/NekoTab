@@ -38,7 +38,7 @@ command -v dx >/dev/null 2>&1 || {
 command -v rustc >/dev/null 2>&1 || { echo "!! 找不到 rustc" >&2; exit 1; }
 
 # 编译缓存默认放 ext4（避免 /mnt 的 9p 文件系统拖慢编译），可用环境变量覆盖。
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/mtab-lite-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/nekotab-target}"
 
 HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 TARGETS=("$@")
@@ -59,7 +59,7 @@ docker_arch() {
     esac
 }
 
-DX_OUT="$CARGO_TARGET_DIR/dx/mtab-lite/release/web"
+DX_OUT="$CARGO_TARGET_DIR/dx/nekotab/release/web"
 
 # 先清掉上一次的客户端产物再构建。
 # dx 往 public/assets/ 里写的是带内容哈希的文件名，且**只增不减**：换一次代码就
@@ -104,7 +104,7 @@ for t in "${TARGETS[@]}"; do
         export "CARGO_TARGET_${key}_LINKER=$cc_bin"
         export "CC_${key}=$cc_bin"
         cargo build --release --target "$t" --no-default-features --features server
-        stage "$CARGO_TARGET_DIR/$t/release/mtab-lite" "$dest"
+        stage "$CARGO_TARGET_DIR/$t/release/nekotab" "$dest"
     fi
 done
 

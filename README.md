@@ -1,4 +1,4 @@
-# mtab-lite
+# NekoTab
 
 极简、可自部署的书签导航页，界面参照浏览器新标签页：大字时钟（带农历）+
 搜索引擎框 + 分类标签页 + 图标网格。
@@ -281,7 +281,7 @@ dioxus 的解释器在把 `style` 设成空串时，会把「之前设过、现�
 
 **装了 panic 钩子。** 同样是 `panic = "abort"` 的后果：wasm 里 panic 只会变成一个
 没有信息的 `unreachable`。钩子在 abort 之前把消息与位置打成一行 `console.error`，
-并写进一个固定 id 的 DOM 节点（`#mtab-panic`）——应用崩死之后那个节点还在，
+并写进一个固定 id 的 DOM 节点（`#nekotab-panic`）——应用崩死之后那个节点还在，
 从外部也能读到现场。上面那个坑就是靠它定位到 `runtime.rs:223` 的。
 
 **分组图标塞进原来的 `icon` 字段，不新增表结构。** 图标值有三种形态：
@@ -318,6 +318,12 @@ dioxus 的解释器在把 `style` 设成空串时，会把「之前设过、现�
 
 复制 `.env.example` 为 `.env` 后按需修改。
 
+**为什么还有几处叫 `mtab`。** 应用名统一成了 NekoTab，但**数据所在位置**的名字有意
+没跟着改：数据库文件仍是 `mtab.db`，`docker run` 示例里的卷名仍是 `mtab-data`。
+改个名字容易，改数据位置会让人看着像"书签全没了"——沿用旧名字，现有部署升级后
+照样读到原来的库。要把这些一并改成 `nekotab.*`，那是一次数据迁移（移动文件 +
+改环境变量），不是重命名，得单独做。
+
 ## 本地开发
 
 先装与依赖版本一致的 CLI：
@@ -351,7 +357,7 @@ cargo check --no-default-features --features web --target wasm32-unknown-unknown
 dx build --release --platform web
 ```
 
-产物在 `target/dx/mtab-lite/release/web/`：客户端资源在 `public/`，
+产物在 `target/dx/nekotab/release/web/`：客户端资源在 `public/`，
 服务端二进制名为 `server`（Windows 下 `server.exe`）。
 
 **务必用 release 构建对外提供服务。** 开发构建的 wasm 有 63 MB（不优化且带调试
@@ -364,11 +370,11 @@ dx build --release --platform web
 ## Docker
 
 ```bash
-docker build -t mtab-lite .
-docker run -d --name mtab-lite \
+docker build -t nekotab .
+docker run -d --name nekotab \
   -p 8080:8080 \
   -v mtab-data:/data \
-  mtab-lite
+  nekotab
 ```
 
 数据落在 `/data/mtab.db`（连同 WAL 的 `-wal` / `-shm` 文件），图标落在

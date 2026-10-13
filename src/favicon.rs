@@ -203,7 +203,7 @@ mod server {
             Err(e) => {
                 // 这里不能吞掉错误：查库失败会让"所有主机都不在书签里"，
                 // 于是所有图标一起 404，而日志里什么都不留，非常难查。
-                eprintln!("[mtab] 取图标前读书签失败，本次请求无法服务: {e}");
+                eprintln!("[NekoTab] 取图标前读书签失败，本次请求无法服务: {e}");
                 return not_found();
             }
         };
@@ -247,7 +247,7 @@ mod server {
             None => {
                 // 一行日志说明每一步为什么失败。以前这里是静默的，
                 // 线上"图标全取不到"只能靠猜。
-                eprintln!("[mtab] 取不到图标 {host}：{}", steps.join("；"));
+                eprintln!("[NekoTab] 取不到图标 {host}：{}", steps.join("；"));
                 (String::new(), Vec::new())
             }
         };

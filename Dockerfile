@@ -1,7 +1,7 @@
 # 多阶段构建。已在 WSL(Ubuntu 24.04) + Docker 实测通过：
-#   docker build -t mtab-lite .
-#   docker run -d --name mtab-lite -p 8080:8080 -v mtab-data:/data mtab-lite
-# 产物目录 target/dx/mtab-lite/release/web/ 内含服务端二进制 server 与 public/。
+#   docker build -t nekotab .
+#   docker run -d --name nekotab -p 8080:8080 -v mtab-data:/data nekotab
+# 产物目录 target/dx/nekotab/release/web/ 内含服务端二进制 server 与 public/。
 
 # ---------- 构建阶段 ----------
 # 基础镜像版本由实际依赖决定，不能用 Cargo.toml 里声明的 rust-version 1.85：
@@ -47,7 +47,7 @@ WORKDIR /app
 # 实测：服务端启动时会读取可执行文件同级的 public/ 目录（index.html / wasm /
 # assets）。dx 会指好该目录，但裸跑二进制必须自带它，因此这里拷贝整个 web/
 # 产物目录，而不是只拷可执行文件。
-COPY --from=builder /app/target/dx/mtab-lite/release/web/ /app/
+COPY --from=builder /app/target/dx/nekotab/release/web/ /app/
 
 # ICON_DIR 与数据一起放挂载卷：图标是落盘缓存的字节，容器重建后不必重新代取。
 ENV DATABASE_URL="sqlite:///data/mtab.db?mode=rwc" \
@@ -58,6 +58,6 @@ ENV DATABASE_URL="sqlite:///data/mtab.db?mode=rwc" \
 VOLUME /data
 EXPOSE 8080
 
-# dx build --platform web 产出的服务端二进制名为 `server`（不是包名 mtab-lite），
+# dx build --platform web 产出的服务端二进制名为 `server`（不是包名 nekotab），
 # 实测位于 web/ 目录根部，与 public/ 同级。
 CMD ["/app/server"]

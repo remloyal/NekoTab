@@ -1,5 +1,5 @@
 [application]
-name = "mtab-lite"
+name = "nekotab"
 
 [web]
 # 构建期把客户端产物预压成 <file>.br（brotli q11）。
@@ -9,4 +9,4 @@ name = "mtab-lite"
 pre_compress = true
 
 [web.app]
-title = "mtab-lite | 书签导航"
+title = "NekoTab | 书签导航"

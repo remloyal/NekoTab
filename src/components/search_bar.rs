@@ -30,7 +30,7 @@ impl SearchMode {
 }
 
 /// 输入框的元素 id：`Ctrl+K` 与 `/` 靠它把焦点送回来。
-pub const SEARCH_INPUT_ID: &str = "mtab-search-input";
+pub const SEARCH_INPUT_ID: &str = "nekotab-search-input";
 
 /// 拆出引擎前缀。`gh rust` + 引擎前缀 `gh` → `("gh", "rust")`。
 ///

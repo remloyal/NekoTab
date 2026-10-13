@@ -6,7 +6,7 @@ use crate::backend::{clear_icon_cache, error_text, import_bookmarks, save_settin
 use crate::models::{Group, ImportReport, Settings, BACKGROUND_PRESETS, THEMES};
 
 /// 文件选择器的 id，读文件时靠它取到 `<input type="file">`。
-const IMPORT_FILE_ID: &str = "mtab-import-file";
+const IMPORT_FILE_ID: &str = "nekotab-import-file";
 
 /// 读取所选文件的脚本（交给 `document::eval` 跑）。
 ///
@@ -21,7 +21,7 @@ const IMPORT_FILE_ID: &str = "mtab-import-file";
 /// 后续所有动作都在 `onchange` 事件触发的那次 `spawn` 里做（task 轮询时
 /// Dioxus 会把作用域压在栈上，见 dioxus-core `tasks.rs`）。
 const READ_FILE_SCRIPT: &str = r#"
-const input = document.getElementById('mtab-import-file');
+const input = document.getElementById('nekotab-import-file');
 const file = input && input.files && input.files[0];
 if (!file) {
     dioxus.send(null);
@@ -592,7 +592,7 @@ pub fn SettingsPanel(
                             a {
                                 class: "btn-ghost export-link",
                                 href: "/export/bookmarks.json",
-                                download: "mtab-bookmarks.json",
+                                download: "nekotab-bookmarks.json",
                                 "下载 JSON 备份"
                             }
                             p { class: "field-hint", "含标签、分组与顺序，可直接粘回上方文本框恢复。" }

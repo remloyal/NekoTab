@@ -1,4 +1,4 @@
-# mtab-lite 需求文档
+# NekoTab 需求文档
 
 > 版本：v1.0
 > 日期：2026-10-12
@@ -247,7 +247,7 @@ pub struct NewBookmark {
 ## 6. 项目结构
 
 ```
-mtab-lite/
+NekoTab/
 ├── Cargo.toml
 ├── Dioxus.toml
 ├── Dockerfile
@@ -942,7 +942,7 @@ sqlx 会校验已应用迁移文件的校验和。**正确做法是新增一个�
 ### 20.6 已实测（v1.5）
 
 - **导出**：`/export/bookmarks.json` 返回 200，`Content-Type` 与
-  `Content-Disposition: attachment; filename="mtab-bookmarks.json"` 正确，
+  `Content-Disposition: attachment; filename="nekotab-bookmarks.json"` 正确，
   正文按当前显示顺序输出无损 JSON；
 - **导入（接口）**：粘贴含嵌套文件夹、实体、重复项与非 http 链接的样例，
   回执 `{"imported":4,"skipped":1}`；修正口径后另一组样例
