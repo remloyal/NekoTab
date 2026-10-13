@@ -539,33 +539,6 @@ body {
     background: var(--accent);
 }
 
-/* 筛选提示行 */
-.filter-note {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin: 0 0 18px;
-    font-size: 12.5px;
-    color: var(--text);
-    opacity: 0.7;
-}
-
-.link-btn {
-    padding: 2px 8px;
-    font: inherit;
-    font-size: 12.5px;
-    color: var(--accent);
-    background: none;
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    text-decoration: underline;
-}
-
-.link-btn:hover {
-    background: var(--accent-soft);
-}
-
 /* ---------- 图标网格 ---------- */
 .grid {
     display: grid;

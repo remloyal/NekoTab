@@ -626,26 +626,6 @@ pub fn Home() -> Element {
                         }
                     }
 
-                    if !keyword.is_empty() || !active_value.is_empty() {
-                        p { class: "filter-note",
-                            "筛选出 {matched.len()} 条"
-                            if !active_value.is_empty() {
-                                "（分类：{tabs.iter().find(|t| t.value == active_value).map(|t| t.label.clone()).unwrap_or_default()}）"
-                            }
-                            "　共 {total} 条。"
-                            button {
-                                class: "link-btn",
-                                r#type: "button",
-                                onclick: move |_| {
-                                    active_group.set(String::new());
-                                    query.set(String::new());
-                                    page.set(0);
-                                },
-                                "清空筛选"
-                            }
-                        }
-                    }
-
                     if let Some(err) = error.clone() {
                         div { class: "state state-error", "加载失败：{err}" }
                     } else if loading {
