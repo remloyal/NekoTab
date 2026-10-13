@@ -18,6 +18,12 @@
 #   SKIP_LATEST   非空则不更新 latest
 #   DRY_RUN       非空则只打印命令
 #   DOCKER_USER / DOCKER_TOKEN   两者都设则先自动 docker login（适合 CI）
+#   NEKOTAB_WSL_DISTRO           Windows 下指定用哪个 WSL 发行版（默认用默认发行版）
+#   NEKOTAB_NO_WSL               非空则不在 Windows 下自动改用 WSL
+#
+# Windows 用户注意：产物的服务端二进制必须是 Linux 的，而 docker 通常也只装在
+# WSL 里。所以在 Git Bash/MSYS 下运行本脚本时，它会自动把自己丢进 WSL 重跑一遍
+# （详见下方注释），直接 `scripts/publish.sh` 即可。
 #
 # 前置：
 #   * 已 docker login（或设 DOCKER_USER/DOCKER_TOKEN）
@@ -30,6 +36,48 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# ---- Windows(Git Bash/MSYS) 下自动改到 WSL 里执行 ----
+#
+# 发布链路的产物必须是 Linux 的：pack-linux.sh 用本机工具链编译服务端二进制，
+# 而 Windows 上编出的是 server.exe（PE 文件），塞进 Linux 容器跑不起来。
+# 另外 docker 往往只装在 WSL 里（没装 Docker Desktop 时 Git Bash 完全看不到），
+# 于是脚本会在 `command -v docker` 那一步直接失败。
+#
+# 所以：检测到 MSYS/MinGW 且 wsl.exe 可用时，把脚本自己丢进 WSL 重跑一遍。
+#   * 仓库路径交给 WSL 侧的 wslpath 转换（比手工拼 /mnt 前缀可靠）
+#   * 参数按原样转过去（版本号等）
+#   * 凭据沿用 WSL 里已有的 docker login
+#   * NEKOTAB_IN_WSL 是防重入标记：WSL 里也能看到 wsl.exe（interop），
+#     不标记就会无限套娃
+# 想自己指定发行版：NEKOTAB_WSL_DISTRO=Ubuntu-24.04
+# 想关掉这个行为（例如非 WSL 的其它 Linux 环境）：NEKOTAB_NO_WSL=1
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+        if [ -z "${NEKOTAB_IN_WSL:-}" ] && [ -z "${NEKOTAB_NO_WSL:-}" ] \
+            && command -v wsl.exe >/dev/null 2>&1; then
+            if command -v cygpath >/dev/null 2>&1; then
+                win_root="$(cygpath -w "$REPO_ROOT")"
+            else
+                win_root="$REPO_ROOT"
+            fi
+
+            inner="cd \"\$(wslpath -a '$win_root')\" && NEKOTAB_IN_WSL=1 bash scripts/publish.sh"
+            for arg in "$@"; do
+                inner="$inner $(printf '%q' "$arg")"
+            done
+
+            wsl_args=(wsl.exe)
+            if [ -n "${NEKOTAB_WSL_DISTRO:-}" ]; then
+                wsl_args+=(-d "$NEKOTAB_WSL_DISTRO")
+            fi
+
+            echo ">> 本机（$(uname -s)）不适合构建 Linux 产物，改用 WSL 里的 docker 重新执行"
+            echo "   （关掉这个行为：NEKOTAB_NO_WSL=1）"
+            exec "${wsl_args[@]}" -- bash -lc "$inner"
+        fi
+        ;;
+esac
 
 export DOCKER_CLI_EXPERIMENTAL=enabled   # docker manifest 子命令
 
@@ -80,7 +128,11 @@ run() {
     fi
 }
 
-command -v docker >/dev/null 2>&1 || { echo "!! 找不到 docker" >&2; exit 1; }
+command -v docker >/dev/null 2>&1 || {
+    echo "!! 找不到 docker" >&2
+    echo "   Windows 上 docker 一般装在 WSL 里：在 WSL 内执行本脚本，或去掉 NEKOTAB_NO_WSL 让它自动切换。" >&2
+    exit 1
+}
 if ! docker buildx version >/dev/null 2>&1; then
     echo "!! 需要 docker buildx（Ubuntu：apt install docker-buildx）" >&2
     exit 1
