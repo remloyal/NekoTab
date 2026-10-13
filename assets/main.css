@@ -18,6 +18,10 @@
     --shadow-strong: rgba(0, 0, 0, 0.55);
     --shadow-soft: rgba(0, 0, 0, 0.38);
 
+    /* 滚动条滑块。默认深色主题用浅色半透明，浅色主题换成深色。 */
+    --scrollbar-thumb: rgba(255, 255, 255, 0.26);
+    --scrollbar-thumb-hover: rgba(255, 255, 255, 0.44);
+
     /* 由 home.rs 按设置覆盖：卡片尺寸、间距、列数模板 */
     --tile-size: 96px;
     --tile-gap-x: 8px;
@@ -44,6 +48,9 @@
     --overlay: rgba(40, 48, 62, 0.4);
     --shadow-strong: rgba(30, 40, 60, 0.24);
     --shadow-soft: rgba(30, 40, 60, 0.16);
+
+    --scrollbar-thumb: rgba(20, 30, 50, 0.26);
+    --scrollbar-thumb-hover: rgba(20, 30, 50, 0.44);
 }
 
 * {
@@ -54,7 +61,11 @@ html,
 body {
     margin: 0;
     padding: 0;
-    min-height: 100%;
+    height: 100%;
+    /* 页面滚动整体交给 .stage-root（见下）。body 不再滚动，就不会出现
+       「视口边缘一条、内容区一条」的双滚动条；滚动条的预留沟槽也随之落在
+       页面内部，而不是贴着视口右缘。 */
+    overflow: hidden;
 }
 
 body {
@@ -69,7 +80,16 @@ body {
 }
 
 .stage-root {
-    min-height: 100vh;
+    /* 视口高度的滚动容器。页面本身不滚（见 html/body 的 overflow: hidden），
+       由这一层滚——它透明地盖在固定的壁纸层上，所以滚动条沟槽露出的是壁纸，
+       而不是 body 的兜底色。 */
+    height: 100vh;
+    height: 100dvh;
+    overflow-y: auto;
+    /* 恒定预留滚动条的位置。否则内容一超过一屏、滚动条一出现，视口可用宽度
+       就少 15px，居中的时钟/搜索框/网格会整体左移（就是「滚动条挤压页面」）。
+       both-edges 在两侧各留一份，居中的内容才始终落在视口正中。 */
+    scrollbar-gutter: stable both-edges;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -81,6 +101,39 @@ body {
        没显式写 color 的子元素（如大时钟）会一路继承 body 的深色主题字色，
        在浅色背景上等于看不见。 */
     color: var(--text);
+}
+
+/* ---------- 滚动条 ---------- */
+/* 细的悬浮条：轨道透明、滑块半透明，压在壁纸上不抢眼。
+   两套写法都给：Chrome 121+ / Firefox 认 scrollbar-width / scrollbar-color
+   （此时 ::-webkit-scrollbar 会被忽略，预留的沟槽宽度取 thin 的宽度）；
+   旧 Safari / 旧 Chromium 则走下面的 ::-webkit-scrollbar。 */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 999px;
+    /* 透明边框 + background-clip：把滑块收成细条，两侧留出呼吸感 */
+    border: 3px solid transparent;
+    background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: content-box;
 }
 
 /* ---------- 背景层 ---------- */
