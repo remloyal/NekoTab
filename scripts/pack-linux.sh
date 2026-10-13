@@ -59,14 +59,27 @@ docker_arch() {
     esac
 }
 
+DX_OUT="$CARGO_TARGET_DIR/dx/mtab-lite/release/web"
+
+# 先清掉上一次的客户端产物再构建。
+# dx 往 public/assets/ 里写的是带内容哈希的文件名，且**只增不减**：换一次代码就
+# 多一份 wasm/js，旧的一直留着。而下面 stage() 是整目录拷贝，于是这些陈旧产物
+# 会一起进镜像——实测一次发布里躺着 4 份 wasm 共 6.3 MB，其中 3 份是历史版本，
+# 而且部署后仍可被 URL 直接请求到（等于对外提供旧版客户端）。
+# public/ 是 dx 的生成目录（不是仓库里的源目录，本项目自己的资源在 assets/），
+# 删掉后每次构建都会完整重建。
+rm -rf "$DX_OUT"
+
 echo ">> 构建客户端（wasm，与架构无关）"
 dx build --release --platform web
 
-DX_OUT="$CARGO_TARGET_DIR/dx/mtab-lite/release/web"
 if [ ! -d "$DX_OUT/public" ]; then
     echo "!! 缺少客户端产物：$DX_OUT/public" >&2
     exit 1
 fi
+
+# 自检：产物里只应有本次构建引用的那一份 wasm，多出来就是上面的清理没生效
+echo "   -> public 资源合计 $(du -sh "$DX_OUT/public" | cut -f1)，wasm $(ls -1 "$DX_OUT/public/assets/"*.wasm 2>/dev/null | wc -l) 份"
 
 stage() {         # $1=服务端二进制路径  $2=输出目录
     local dest="$REPO_ROOT/$2"
