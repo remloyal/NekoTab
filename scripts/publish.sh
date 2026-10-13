@@ -33,6 +33,12 @@ cd "$REPO_ROOT"
 
 export DOCKER_CLI_EXPERIMENTAL=enabled   # docker manifest 子命令
 
+# rustup 安装时用了 --no-modify-path，普通 shell 里 ~/.cargo/bin 不在 PATH 上，这里补上。
+if [ -x "$HOME/.cargo/bin/dx" ] && ! command -v dx >/dev/null 2>&1; then
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+fi
+
 IMAGE="${IMAGE:-remloyal001/nekotab}"
 ARCHES="${ARCHES:-amd64 arm64}"
 

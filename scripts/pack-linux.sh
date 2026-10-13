@@ -24,6 +24,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# rustup 安装时用了 --no-modify-path，普通 shell 里 ~/.cargo/bin 不在 PATH 上，这里补上，
+# 保证脚本可以直接跑（也能让调用它的 publish.sh 继承到）。
+if [ -x "$HOME/.cargo/bin/dx" ] && ! command -v dx >/dev/null 2>&1; then
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+fi
+
 command -v dx >/dev/null 2>&1 || {
     echo "!! 找不到 dx：cargo install dioxus-cli --version 0.7.10 --locked" >&2
     exit 1
