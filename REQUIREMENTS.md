@@ -178,6 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_bookmarks_order
 | 变量 | 必填 | 默认 | 说明 |
 |------|------|------|------|
 | `DATABASE_URL` | 是 | — | 如 `sqlite:///data/mtab.db?mode=rwc` |
+| `ICON_DIR` | 否 | `data/icon` | 站点图标缓存目录（图标字节落盘，库表只留元数据） |
 | `IP` | 否 | `127.0.0.1`（Docker 中 `0.0.0.0`） | 监听地址（变量名是 `IP`，不是 `HOST`） |
 | `PORT` | 否 | `8080` | 监听端口 |
 

@@ -49,6 +49,7 @@ WORKDIR /app
 # 产物目录，而不是只拷可执行文件。
 COPY --from=builder /app/target/dx/mtab-lite/release/web/ /app/
 
+# ICON_DIR 与数据一起放挂载卷：图标是落盘缓存的字节，容器重建后不必重新代取。
 ENV DATABASE_URL="sqlite:///data/mtab.db?mode=rwc" \
     ICON_DIR="/data/icon" \
     IP=0.0.0.0 \
