@@ -1345,4 +1345,175 @@ let router = dioxus::server::router(App)
   （本次约 1.07 MB）。不影响访问，但会白占镜像体积；打包前清一下更干净。
 - 未做 brotli / zstd；未做预压缩静态文件（tower-http 的 `ServeDir` 支持
   `precompressed_*`，但 dioxus-server 内部构造的 ServeDir 没有开，且那要改上游）。
+  **这两条已在 §27 处理，其中"dioxus-server 不开预压缩"的判断是错的。**
 - 开发构建体积大是 dioxus 的固有行为，未尝试通过 `[profile.dev]` 调参缓解。
+
+## 27. 首屏直出列表 + 构建期 brotli（v2.2）
+
+### 27.1 结论先行
+
+「第一次进来要等好几秒」的根因**不是 wasm 体积，而是首屏内容依赖 wasm**。
+列表（和由它派生的标签栏）用的是 `use_resource`，SSR 阶段它不执行，所以服务端只
+渲出一个 `加载中…`；用户看到卡片的时间 = JS 下载 + wasm 下载 + hydrate + 再拉一次
+列表。在跨境链路上这就是 6~9 秒的白等。
+
+两处改动：
+
+1. 列表改 `use_server_future`，卡片和标签栏直接进 SSR 的 HTML；
+2. wasm 改为**构建期 brotli（q11）**，比 gzip 再省 24%。
+
+### 27.2 列表直出：为什么用两个 hook 而不是一个
+
+最直觉的写法是 `use_server_future(move || async move { let _ = refresh(); ... })?`，
+但这样每次增删改排序都会闪回「加载中」。原因在 dioxus 的实现里：
+
+- `use_server_future` 靠外层 `?` 表达 suspend，而它的判定是
+  `resource.state() == Pending` 就返回 `RenderError::Suspended`；
+- `use_resource` 在依赖变化重跑时，`cb` 只把状态置回 `Pending`，**不清空 value**
+  （`value.write().take()` 只在手动 `clear()` 里，见 `use_resource.rs`）；
+- 而 Suspense 边界在子组件一 suspend 时就会把已渲染内容移到后台 DOM、改显示
+  fallback（`dioxus-core/src/suspense/component.rs` 的 `(None, true)` 分支）。
+
+所以一个带 `refresh` 依赖的 `use_server_future` = 每次保存都整块闪一下。改成两个
+hook 分工：
+
+```rust
+// 只在 SSR 跑一次，结果随 HTML 下发，hydrate 直接复用；刻意不带 refresh 依赖
+let initial = use_server_future(move || async move { list_bookmarks(String::new()).await })?;
+
+// 客户端的增量重查仍由 use_resource 负责；它保留旧值，重查期间不闪
+let bookmarks = use_resource(move || async move {
+    if refresh() == 0 {
+        // 首帧直接用服务端带来的数据，避免首屏多打一次接口
+        if let Some(v) = (&*initial.peek()).clone() { return v; }
+    }
+    list_bookmarks(String::new()).await
+});
+
+// 首屏优先用服务端直出的数据，客户端资源就绪后换成它
+let snapshot = match (&*bookmarks.read()).clone() {
+    Some(v) => Some(v),
+    None => (&*initial.read()).clone(),
+};
+```
+
+时钟与一言仍不 SSR：时钟依赖"现在"，硬 SSR 会造成 hydration 失配（渲染空串是刻意
+的）；一言要让服务端出网，会把第三方延迟直接加到自己的 TTFB 上。
+
+### 27.3 brotli：构建期压一次，而不是实时压
+
+先量了各质量档（同一份 1,058,172 B 的 wasm，本机 `brotli` CLI）：
+
+| 质量 | 体积 | 编码耗时 |
+|---|---|---|
+| gzip -9 | 423,297 B | — |
+| br 4 | 408,491 B | 245 ms |
+| br 6 | 371,831 B | 110 ms |
+| br 9 | 368,902 B | 160 ms |
+| br 11 | **325,928 B** | **2,073 ms** |
+
+两个结论：**tower-http 的实时 brotli 默认质量是 4**（沿用 nginx 的取舍），相对 gzip
+只省 3.6%，基本等于没用；而质量 11 要 2 秒 CPU/次，不能实时压。
+
+于是改用构建期预压缩。查 dioxus-server 源码发现 `serve_dir_cached` 在 release 下
+会把 `public/` 下**每个文件单独注册成一条路由**，且用的是
+`ServeFile::new(&path).precompressed_br()`——也就是说**它本来就支持预压缩的 `.br`**，
+只是磁盘上没有（§26.7 说"dioxus-server 内部构造的 ServeDir 没有开"，只对了一半：
+目录是递归展开成逐文件路由的，逐文件路由开了）。
+
+所以只要 `Dioxus.toml` 里开 `[web] pre_compress = true`，dx 就会为每个产物写出
+`<file>.br`（`BrotliEncoderParams::default()` 的质量正好是 11）。**不新增任何依赖，
+运行时零 CPU**，拿到的是 q11 的体积。
+
+第二层是 router 上的 `tower_http::compression::CompressionLayer`，**gzip 与 brotli
+都开**，负责没有 `.br` 可发的动态响应（SSR 的 HTML、server function 的 JSON）。
+它不会重复压第一层的产物——响应已带 `content-encoding`，压缩层会跳过，所以"实时
+brotli 质量低"在这里不构成问题（这句话在 v2.1 曾是我"不开 br"的理由，加上预压缩
+之后就不成立了）。质量显式设成 6：tower-http 给实时 brotli 的默认是 4（沿用 nginx
+的取舍），抬到 6 多花的 CPU 可忽略，而 gzip 的默认本来就是 6、不受影响。
+
+实测动态响应：SSR HTML 14,959 B → gzip 3,512 B / **br 3,185 B**。
+
+### 27.4 实测（v2.2）
+
+线上实测（本机 → tab.remloyal.cn，同一份产物分别走 gzip / br）：
+
+| | 改动前 | 改动后 |
+|---|---|---|
+| wasm raw | 1,058,172 B | 1,147,577 B |
+| wasm 实际传输 | gzip 433,159 B | **br 345,854 B**（省 24%） |
+| js 实际传输 | gzip 14,221 B | br 12,017 B |
+| SSR HTML | gzip 1,273 B（无列表） | **br 3,185 B**（gzip 3,512 B；含 10 卡片 + 标签栏） |
+
+最终的压缩协商矩阵（起 release 服务实测，`-.--` 表示该编码不可用）：
+
+| 请求的资源 | `br, gzip` | 只 `gzip` | `identity` |
+|---|---|---|---|
+| wasm（静态） | **br 345,854 B** | gzip 455,106 B | 1,147,577 B |
+| SSR HTML（动态） | **br 3,185 B** | gzip 3,512 B | 14,959 B |
+
+wasm 那一行走的是构建期的 `.br` 文件，压缩层没有重复压它（响应已带
+`content-encoding`）；HTML 那一行才是压缩层实时压的。
+
+首屏关键路径的字节数略有上升（HTML 因为带了列表涨了约 2.3 KB），但**可见内容不再
+等 wasm**：HTML 一到就有卡片。
+
+浏览器端验证（IAB / Chromium）：
+
+- `window.hydration_callback` 已注册、`hydrate_queue` 已清空 → 已 hydrate；
+- 加载期 `performance` 里 **`list_bookmarks` 请求数 = 0**（只有 list_engines /
+  get_settings / get_quote 这三个仍走 `use_resource` 的）→ 首屏确实复用了服务端数据，
+  没有重复请求；
+- 点「git」标签，网格从 10 张筛到 1 张（GitHub）→ 事件处理器已挂上，hydration 生效。
+
+服务端：`cargo test --no-default-features --features server` 20 个用例通过；server 与
+web(wasm32) 两个 feature 的 `cargo check` 零告警。
+
+### 27.5 代价与遗留
+
+- **wasm 涨了约 89 KB（+8.4%）**：引入 `use_server_future` 会把 fullstack 的数据
+  传输/序列化胶水带进客户端。br 后是 0.33 MB → 0.34 MB。相对"省掉整段等待"划算。
+- 时钟、一言仍不直出（原因见 27.2）；背景图在非随机模式下仍要等 settings 到位
+  （settings 还是 `use_resource`）。这两项可以按同样的"双 hook"套路再收一批。
+- `pre_compress` 只覆盖 dx 生成、复制进 `public/assets/` 的文件。动态响应（SSR 的
+  HTML、server function 的 JSON）没有 `.br`，靠压缩层实时压（br q6）。
+- **开发构建下 brotli 不生效**：dx 里那个开关是 `pre_compress & release`，而且
+  debug 模式下 dioxus-server 走 `ServeDir` 而不是逐文件 `precompressed_br` 路由。
+  本地想看真实效果用 `dx serve -r`。
+- **dx 的客户端构建在本机偶发崩溃**（`wasm_opt.rs` 复制临时文件时报
+  `Os { code: 3, NotFound }`）。同一命令重跑即可通过，11:15 / 11:19 / 11:43 三次都是
+  重试成功；疑似 Windows 上临时文件被实时防护短暂占用，未深究。
+
+## 28. 已否决：wasm-split 代码分割（v2.2 实验）
+
+为了评估"以后功能变多、包变大"的应对手段，实测了 `dx build --release --platform web
+--wasm-split`（`dioxus/wasm-split` feature + 组件标 `#[component(lazy)]`）。
+**结论是负收益，不采用。** 记录在此以免重复踩。
+
+| | 基线（单包） | 只开 wasm-split | 再给 7 个非关键组件加 lazy |
+|---|---|---|---|
+| main wasm | 1,058,172 B | 768,857 B | 774,027 B |
+| 路由 chunk | — | 787,230 B | 717,945 B |
+| 懒加载 chunk ×7 | — | — | 1,254,176 B |
+| 首屏关键路径 | 438 KB gzip / **1 跳** | 533 KB gzip / 2 跳 | 511 KB gzip / 2 跳 |
+| 全量合计 | 438 KB gzip | 533 KB gzip | **958 KB gzip（2.2 倍）** |
+
+三条原因：
+
+1. **强制保留符号名**。dx 里 `keep_names` 被 `wasm_split` 强制打开，名字段占每个
+   chunk 的 18~44%（基线因为 wasm-opt 把它们删了，只有 5 B）。
+2. **必须关掉 `strip`**。拆分器要用 `--emit-relocs` 的重定位段建调用图，而
+   `[profile.release]` 的 `strip = true` 会删掉它，报
+   `Module does not contain the reloc section`；dx 自己不管 `strip`，只警告 `debug`。
+3. **共享代码/数据被复制进多个 chunk**：各包 code 相加 833 KB → 1,407 KB，
+   data 204 KB → 611 KB。
+
+另外它**不稳定**：完全相同的配置，第一次构建成功、第二次失败在同一处。
+
+对单路由应用最致命的一点：路由级拆分是**无条件的**（`route.rs` 对每个
+`RouteType::Leaf` 都展开懒加载包装，没有 per-route 开关），所以唯一的路由 `/` 会被
+切成一个独立 chunk，首屏变成"先下主包、再下 Home chunk"两跳串行，只会更慢。
+
+顺带验证了"拆小并行会不会更快"：在同一台服务器上把 1 MB 拆成 4 份并行 Range 请求，
+墙钟 **13~16 s**，而单次请求是 **4~8 s**——这条链路是带宽受限而非连接数受限，
+多连接反而更慢。（带宽瓶颈下墙钟时间 ∝ 总字节，与切成几份无关。）

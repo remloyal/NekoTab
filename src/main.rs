@@ -70,9 +70,19 @@ fn main() {
                     "/icon/{host}",
                     dioxus::server::axum::routing::get(favicon::icon_handler),
                 )
-                // 响应压缩：dioxus-server 自身不做，正式构建的 wasm 约 1MB，
-                // 加上 gzip 后传输量约降到四成。由客户端 Accept-Encoding 决定。
-                .layer(tower_http::compression::CompressionLayer::new());
+                // 响应压缩，gzip 与 brotli 都开。
+                //
+                // 静态产物（wasm / js / css）已在构建期压成 .br（见 Dioxus.toml 的
+                // pre_compress，质量 11），dioxus-server 的 ServeFile::precompressed_br()
+                // 直接发那份、运行时零 CPU；本层不会重复压它们——响应已带
+                // content-encoding，压缩层会跳过。
+                //
+                // 这里负责的是动态响应：SSR 的 HTML、server function 的 JSON。
+                // 质量显式设 6：tower-http 给实时 brotli 的默认是 4（沿用 nginx 的
+                // 取舍），抬到 6 多花的 CPU 可忽略；gzip 默认本来就是 6，不受影响。
+                .layer(tower_http::compression::CompressionLayer::new().quality(
+                    tower_http::compression::CompressionLevel::Precise(6),
+                ));
 
             Ok(router)
         });

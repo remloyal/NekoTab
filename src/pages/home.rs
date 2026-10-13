@@ -61,8 +61,23 @@ pub fn Home() -> Element {
 
     // 列表始终取全量：搜索框是"搜网页"用的，不筛选书签。
     // 分类筛选仍按标签在客户端做——正因为取的是全量，筛选和拖拽重排都不受影响。
+    //
+    // 这里用两个 hook 分工，而不是单个带 refresh 依赖的 use_server_future：
+    //
+    // * `initial` 只在 SSR 阶段跑一次，结果随 HTML 一起下发；hydrate 时直接复用
+    //   序列化好的值，不会再发一次请求。它刻意**不带 refresh 依赖**——一旦重跑，
+    //   use_server_future 会把状态置回 Pending 触发 suspend，而 Suspense 边界在
+    //   子组件 suspend 时显示 fallback，列表就会闪一下「加载中」。
+    // * `bookmarks` 仍是客户端的 use_resource，负责增删改排序后的重查。它会保留
+    //   旧值，所以重查期间不会闪。
+    let initial = use_server_future(move || async move { list_bookmarks(String::new()).await })?;
     let bookmarks = use_resource(move || async move {
-        let _ = refresh();
+        // 首次渲染（refresh 仍为 0）直接用服务端带来的数据，避免首屏多打一次接口
+        if refresh() == 0 {
+            if let Some(v) = (&*initial.peek()).clone() {
+                return v;
+            }
+        }
         list_bookmarks(String::new()).await
     });
 
@@ -76,8 +91,12 @@ pub fn Home() -> Element {
         get_settings().await
     });
 
-    // 取克隆快照，后续一律用普通值计算，避免在 rsx 中与借用/移动纠缠
-    let snapshot = (&*bookmarks.read()).clone();
+    // 取克隆快照，后续一律用普通值计算，避免在 rsx 中与借用/移动纠缠。
+    // 首屏（含 SSR 阶段）优先用服务端直出的数据；客户端资源就绪后换成它。
+    let snapshot = match (&*bookmarks.read()).clone() {
+        Some(v) => Some(v),
+        None => (&*initial.read()).clone(),
+    };
     let engines: Vec<_> = match (&*engines_res.read()).clone() {
         Some(Ok(list)) => list,
         _ => Vec::new(),

@@ -45,7 +45,7 @@
 | 序列化 | serde / serde_json |
 | 配置 | dotenvy |
 | 一言（仅 server） | reqwest（复用 dioxus 已有的 rustls，无系统 OpenSSL 依赖） |
-| 响应压缩（仅 server） | tower-http（只开 gzip；详见"关键设计"） |
+| 响应压缩（仅 server） | 静态产物构建期 brotli（dx `pre_compress`）+ 动态响应走 tower-http 的 gzip/brotli；详见"关键设计" |
 | 时钟 / 搜索跳转（仅 web） | js-sys（`Date`）+ gloo-timers（1s 定时）+ web-sys（`window.open`） |
 
 ## 目录结构
@@ -197,17 +197,24 @@ SSR 阶段不发外部请求，首屏不会被第三方拖慢。
 该参数只在客户端生成：SSR 阶段设置本就还没加载，两边都是空，因此不会
 hydration 失配；参数就绪前先不渲染背景，避免先请求一次旧地址再换掉。
 
-**响应压缩由我们自己加。** dioxus-server 只静态服务、不做压缩（实测带上
-`Accept-Encoding: gzip, br` 也没有 `content-encoding`），而正式构建的 wasm 有
-1.01 MB，会原样传输。所以在 router 上挂了一层
-`tower_http::compression::CompressionLayer`，wasm 从 1.01 MB 降到 0.43 MB。
+**压缩分两层，gzip 与 brotli 都开。**
 
-**只开 gzip，不开 brotli**：brotli 大约只再多省 15%，却要引入整个 `brotli` crate；
-而 gzip 由 `flate2` + `miniz_oxide` + `adler2` + `crc32fast` 提供（都是纯 Rust 小 crate）。
-注意这**不是零成本**——`tower-http` 虽然本就在依赖树里，但它的压缩后端不在。
+第一层是**构建期预压缩**，专治体积最大的静态产物。wasm 是内容哈希命名、不可变的，
+压一次就够，运行时零 CPU：`Dioxus.toml` 里开 `[web] pre_compress = true`，dx 会为
+`public/assets/` 下每个产物写出 `<file>.br`（`BrotliEncoderParams::default()` 的质量
+就是 11）；而 dioxus-server 的静态资源走 `ServeFile::precompressed_br()`，磁盘上有
+`.br` 就直接发它。实测 wasm 1.15 MB → **br 0.34 MB**（同文件 gzip 是 0.44 MB，
+br 再省 24%）。
 
-如果部署时前面挂了 nginx/Caddy 做压缩，这层就是冗余的（不会重复压缩，因为已经
-带了 `content-encoding`，规范上代理不该再压），可以去掉。
+第二层是 router 上的 `tower_http::compression::CompressionLayer`，负责**动态响应**：
+SSR 的 HTML、server function 的 JSON，这些没有 `.br` 文件可发，只能实时压。
+它不会重复压第一层的产物（响应已带 `content-encoding`，会跳过），所以实时 brotli
+"质量低"这件事在这里不构成问题。质量显式设成 6（HTML 3508 → 3094 B）：
+tower-http 给实时 brotli 的默认是 4（沿用 nginx 的取舍），抬到 6 多花的 CPU 可忽略，
+而 gzip 的默认本来就是 6，不受影响。只认 gzip 的客户端自动退回 gzip。
+
+如果部署时前面挂了 nginx/Caddy 做压缩，这两层都是冗余的（`content-encoding`
+已经带上，规范上代理不该再压），可以去掉。
 
 **站点图标由服务端代取并落库。** 浏览器只请求本服务的 `/icon/{host}`，
 服务端按 `host` 命中缓存（`favicons` 表）就直接返回，否则去取并写入。
@@ -274,8 +281,8 @@ dx build --release --platform web
 
 | | `dx serve`（开发） | `dx build --release` |
 |---|---|---|
-| wasm | 63.5 MB | 1.01 MB |
-| 首屏总下载 | 63.5 MB | 1.08 MB（gzip 后约 0.43 MB） |
+| wasm | 63.5 MB | 1.15 MB（br 后 **0.34 MB**） |
+| 首屏总下载 | 63.5 MB | 1.24 MB（br 后约 **0.36 MB**） |
 
 本地想看接近真实的速度，用 `dx serve -r`（release 模式 serve）。
 
@@ -306,8 +313,9 @@ docker run -d --name mtab-lite \
 - **随机模式下限流**：随机图接口每次打开都会真下载一张图（实测约 1MB / 2 秒），
   且要在 hydration 之后才开始，所以首屏会有一小段没有壁纸。
 - **开发构建的客户端极大**：`dx serve` 的 wasm 有 63.5 MB（不优化且带调试信息），
-  正式构建只有 1.01 MB。本地调试感觉慢是正常的，用 `dx serve -r`。
-- **只做 gzip 压缩**，没有 brotli / zstd。要更省传输就交给反向代理。
+  正式构建 1.15 MB（br 后 0.34 MB）。本地调试感觉慢是正常的，用 `dx serve -r`。
+- **压缩没有 zstd**：静态产物是构建期 brotli（q11），动态响应是实时 gzip/brotli（q6）。
+  要更省传输就交给反向代理。
 - **无鉴权。** 单用户自部署定位，公网暴露请自行加反向代理鉴权。
 - **拖拽重排只支持鼠标。** 用的是原生 HTML5 拖放，触屏浏览器不触发；触屏上
   长按仍可进入编辑态，但调整顺序需要指针事件版本（未实现）。
@@ -320,9 +328,11 @@ docker run -d --name mtab-lite \
   这条踩过两次。今后任何表结构变更都必须**新增**文件，比如 `002_xxx.sql`。
 - **分类筛选在客户端**：标签栏反映的是当前结果集的标签集合。
 - **无书签多选 / 批量删除 / 分页。**
-- **首屏不含列表与标签栏。** 列表用 `use_resource`，SSR 阶段渲染"加载中"，由
-  客户端补齐；时钟与一言同理为空。若要让首屏直出数据需改用 `use_server_future`，
-  但搜索重查会重新 suspend。
+- **首屏已直出列表与标签栏。** 列表走 `use_server_future`，SSR 阶段就把卡片和标签
+  渲进 HTML，同一份数据也进 hydration 载荷，客户端**不会再请求一次**。重查（增删改
+  排序）另走一个 `use_resource` 且保留旧值，所以不会闪回"加载中"。时钟与一言仍为空：
+  时钟依赖"现在"，硬 SSR 会造成 hydration 失配；一言要让服务端出网，会把第三方
+  延迟引到自己的 TTFB 上。
 - **搜索引擎跳转在新标签页打开**（脚本 `window.open`），当前书签页不会被顶掉。
   代价是依赖 JS：如果 wasm 没加载起来，搜索框点了不会有反应。
 - **引擎设置不支持 iTab 的"附加搜索 / 单搜"** 等高级项，只做了新增 / 切换 / 删除。

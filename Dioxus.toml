@@ -1,5 +1,12 @@
 [application]
 name = "mtab-lite"
 
+[web]
+# 构建期把客户端产物预压成 <file>.br（brotli q11）。
+# dioxus-server 的静态资源走 ServeFile::precompressed_br()，磁盘上有 .br
+# 就直接发它；比 gzip 再省约 23%（wasm 1058 KB：gzip 423 KB -> br 326 KB），
+# 且运行时零 CPU。没有 .br 的响应仍由 main.rs 里的 gzip 层兜底。
+pre_compress = true
+
 [web.app]
 title = "mtab-lite | 书签导航"

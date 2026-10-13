@@ -28,10 +28,17 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
     "rustls-tls",
     "stream",
 ] }
-# 响应压缩（gzip）。dioxus-server 自身不做压缩，正式构建的客户端产物约 1MB，
-# 不压缩会原样传输。只开 gzip：brotli 大约只多省 15%，却要拉进整个 brotli crate。
+# 响应压缩（gzip + brotli）。两层各管一段：
+#   * 静态产物（wasm / js / css）由 dx 在构建期压成 .br（Dioxus.toml 的 pre_compress，
+#     质量 11），dioxus-server 的 ServeFile::precompressed_br() 直接把那份发出去，
+#     运行时零 CPU；这层碰不到它们（响应已带 content-encoding，会被跳过）。
+#   * 这层负责其余动态响应：SSR 的 HTML、server function 的 JSON。brotli 能再省
+#     一成多（HTML 3508 -> 3094 B），只认 gzip 的客户端自动退回 gzip。
+# quality 显式设 6：tower-http 给实时 brotli 的默认是 4（沿用 nginx 的取舍），
+# 抬到 6 多花的 CPU 可以忽略；gzip 默认本来就是 6，不受影响。
 tower-http = { version = "0.6", optional = true, default-features = false, features = [
     "compression-gzip",
+    "compression-br",
 ] }
 
 # ---- 仅 web（wasm）编译：首页时钟、搜索跳转 ----
