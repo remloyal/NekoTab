@@ -57,6 +57,10 @@ web-sys = { version = "0.3", optional = true, features = [
     "HtmlInputElement",
     "Event",
     "EventTarget",
+    # 主题「跟随系统」：读 / 监听 (prefers-color-scheme: dark)
+    "MediaQueryList",
+    # 书签小工具要拼出本应用的来源地址
+    "Location",
     "console",
 ] }
 

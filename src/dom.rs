@@ -203,6 +203,42 @@ pub fn viewport_size() -> (f64, f64) {
     (0.0, 0.0)
 }
 
+/// 当前页面的来源地址（`scheme://host[:port]`）。
+///
+/// 书签小工具要把完整入口地址写进书签里，所以得知道这个应用对外是什么地址——
+/// 不能写死，部署时可能是任意域名或内网 IP。SSR 阶段取不到，返回空串。
+#[cfg(feature = "web")]
+pub fn current_origin() -> String {
+    web_sys::window()
+        .and_then(|window| window.location().origin().ok())
+        .unwrap_or_default()
+}
+
+#[cfg(not(feature = "web"))]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+pub fn current_origin() -> String {
+    String::new()
+}
+
+/// 把文本写进系统剪贴板。
+///
+/// 走 `navigator.clipboard`，失败就算了——调用方已经同时把内容显示在界面上，
+/// 用户可以自己选中复制，不值得为它弹错误。
+#[cfg(feature = "web")]
+pub fn copy_text(text: &str) {
+    // 用 serde_json 生成合法的 JS 字符串字面量（引号、换行、反斜杠都处理好），
+    // 否则令牌/代码里出现引号就会把脚本拼坏
+    let Ok(literal) = serde_json::to_string(text) else {
+        return;
+    };
+
+    let script = format!("navigator.clipboard && navigator.clipboard.writeText({literal});");
+    let _ = dioxus::prelude::document::eval(&script);
+}
+
+#[cfg(not(feature = "web"))]
+pub fn copy_text(_text: &str) {}
+
 /// 单调递增的毫秒时间戳，用于事件节流。
 #[cfg(feature = "web")]
 pub fn now_ms() -> f64 {
@@ -253,6 +289,65 @@ pub fn install_panic_hook() {
 #[cfg_attr(not(feature = "web"), allow(dead_code))]
 pub fn install_panic_hook() {}
 
+
+/// 系统是否偏好深色。取不到（老浏览器或不支持）时按深色，与默认主题一致。
+#[cfg(feature = "web")]
+pub fn prefers_dark() -> bool {
+    color_scheme_query()
+        .map(|query| query.matches())
+        .unwrap_or(true)
+}
+
+#[cfg(not(feature = "web"))]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+pub fn prefers_dark() -> bool {
+    true
+}
+
+/// 监听系统深浅色变化，回调收到最新偏好。
+///
+/// 监听器闭包存在 `thread_local` 里，与页面同生命周期——「跟随系统」只需要
+/// 装一次；不存住的话 `Closure` 析构会立刻把监听注销掉。
+#[cfg(feature = "web")]
+pub fn watch_color_scheme(mut callback: impl FnMut(bool) + 'static) {
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    let Some(query) = color_scheme_query() else {
+        return;
+    };
+
+    // 回调里要读 query 的最新 matches，所以把句柄一起搬进闭包
+    let query = Rc::new(query);
+    let handler = Closure::<dyn FnMut()>::new({
+        let query = query.clone();
+        move || callback(query.matches())
+    });
+
+    let _ = query.add_event_listener_with_callback("change", handler.as_ref().unchecked_ref());
+
+    WATCHERS.with(|list| list.borrow_mut().push(handler));
+}
+
+#[cfg(not(feature = "web"))]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+pub fn watch_color_scheme(_callback: impl FnMut(bool) + 'static) {}
+
+#[cfg(feature = "web")]
+thread_local! {
+    /// 存住颜色偏好的监听器闭包，否则 `Closure` 一析构监听就没了。
+    static WATCHERS: std::cell::RefCell<Vec<wasm_bindgen::closure::Closure<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "web")]
+fn color_scheme_query() -> Option<web_sys::MediaQueryList> {
+    web_sys::window()?
+        .match_media("(prefers-color-scheme: dark)")
+        .ok()
+        .flatten()
+}
 
 #[cfg(feature = "web")]
 fn document() -> Option<web_sys::Document> {

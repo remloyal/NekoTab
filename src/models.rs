@@ -36,6 +36,19 @@ pub struct NewBookmark {
     pub icon: String,
 }
 
+/// 新增书签的结果。
+///
+/// `created == false` 表示这个 URL 已经存在，本次**没有**写入——去重是按 URL
+/// 精确匹配做的（口径与导入一致），`in_trash` 说明命中的那条在回收站里。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AddOutcome {
+    /// 新记录的 id，或命中的已有记录的 id
+    pub id: i64,
+    pub created: bool,
+    #[serde(default)]
+    pub in_trash: bool,
+}
+
 /// 一个分组（分类标签页）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "server", derive(sqlx::FromRow))]
@@ -100,8 +113,8 @@ pub struct Quote {
 pub const BACKGROUND_PRESETS: [&str; 6] =
     ["aurora", "nebula", "forest", "ocean", "sunset", "mono"];
 
-/// 主题：深色 / 浅色。
-pub const THEMES: [&str; 2] = ["dark", "light"];
+/// 主题：跟随系统 / 深色 / 浅色。
+pub const THEMES: [&str; 3] = ["system", "dark", "light"];
 
 /// 主页设置。纯键值存储，加字段不需要迁移（见 `to_pairs` / `from_pairs`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,7 +138,7 @@ pub struct Settings {
     pub tile_gap_x: i64,
     /// 纵向间距（px）
     pub tile_gap_y: i64,
-    /// 每行固定列数；0 表示按宽度自适应
+    /// 每行**最大**列数；0 表示不限（完全按宽度自适应）
     pub grid_columns: i64,
 
     // ---- 分页 ----
@@ -143,6 +156,10 @@ pub struct Settings {
     pub clock_show_lunar: bool,
     /// 时钟下显示「第 N 天 / 第 N 周」
     pub clock_show_day: bool,
+    /// 12 小时制（前面带「上午 / 下午」）；关闭为 24 小时制
+    pub clock_hour12: bool,
+    /// 时钟显示秒
+    pub clock_show_seconds: bool,
 
     // ---- 行为 ----
     /// 打开书签时开新标签页；关掉则当前页跳转
@@ -173,6 +190,8 @@ impl Default for Settings {
             show_quote: true,
             clock_show_lunar: true,
             clock_show_day: false,
+            clock_hour12: false,
+            clock_show_seconds: true,
 
             open_in_new_tab: true,
             hide_grid: false,
@@ -181,12 +200,47 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// 网格列数对应的 CSS。0 表示按卡片宽度自适应。
+    /// 网格列模板：始终按卡片宽度自适应（`auto-fit`）。
+    ///
+    /// 每行的**最大**列数不写进列模板，而是交给 [`Self::grid_max_width`] 用
+    /// `max-width` 收口。列数只封顶、不写死，于是窗口变窄放不下时自然换行，
+    /// 不会像固定列数那样横向溢出。
     pub fn grid_template_columns(&self) -> String {
-        if self.grid_columns > 0 {
-            format!("repeat({}, {}px)", self.grid_columns, self.tile_size)
-        } else {
-            format!("repeat(auto-fit, {}px)", self.tile_size)
+        format!("repeat(auto-fit, {}px)", self.tile_size)
+    }
+
+    /// 每行最大列数换算出的网格最大宽度，供 CSS `max-width` 使用。
+    ///
+    /// N 列加 (N-1) 个横向间距，正好是容纳 N 列的宽度；`0`（不限）时返回
+    /// `none`，即不设上限。
+    pub fn grid_max_width(&self) -> String {
+        if self.grid_columns <= 0 {
+            return "none".to_string();
+        }
+        format!(
+            "calc({}px * {} + {}px * {})",
+            self.tile_size,
+            self.grid_columns,
+            self.tile_gap_x,
+            self.grid_columns - 1
+        )
+    }
+
+    /// 把主题设置落到具体的一档（`"dark"` / `"light"`）。
+    ///
+    /// `theme == "system"` 时看系统偏好；`system_dark` 为 `None` 表示还没探到
+    /// （SSR 阶段就是这样），按深色渲染，等客户端探到后再重渲染。
+    pub fn effective_theme(&self, system_dark: Option<bool>) -> &'static str {
+        match self.theme.as_str() {
+            "light" => "light",
+            "system" => {
+                if system_dark.unwrap_or(true) {
+                    "dark"
+                } else {
+                    "light"
+                }
+            }
+            _ => "dark",
         }
     }
 }
@@ -225,6 +279,8 @@ impl Settings {
                 "show_quote" => settings.show_quote = parse_bool(&value),
                 "clock_show_lunar" => settings.clock_show_lunar = parse_bool(&value),
                 "clock_show_day" => settings.clock_show_day = parse_bool(&value),
+                "clock_hour12" => settings.clock_hour12 = parse_bool(&value),
+                "clock_show_seconds" => settings.clock_show_seconds = parse_bool(&value),
 
                 "open_in_new_tab" => settings.open_in_new_tab = parse_bool(&value),
                 "hide_grid" => settings.hide_grid = parse_bool(&value),
@@ -257,6 +313,8 @@ impl Settings {
             ("show_quote", bool_str(self.show_quote)),
             ("clock_show_lunar", bool_str(self.clock_show_lunar)),
             ("clock_show_day", bool_str(self.clock_show_day)),
+            ("clock_hour12", bool_str(self.clock_hour12)),
+            ("clock_show_seconds", bool_str(self.clock_show_seconds)),
             ("open_in_new_tab", bool_str(self.open_in_new_tab)),
             ("hide_grid", bool_str(self.hide_grid)),
         ]
@@ -372,6 +430,8 @@ mod tests {
             show_quote: true,
             clock_show_lunar: false,
             clock_show_day: true,
+            clock_hour12: true,
+            clock_show_seconds: false,
             open_in_new_tab: false,
             hide_grid: true,
         };
@@ -446,9 +506,26 @@ mod tests {
     fn grid_columns_css() {
         let mut settings = Settings::default();
         assert_eq!(settings.grid_template_columns(), "repeat(auto-fit, 96px)");
+        assert_eq!(settings.grid_max_width(), "none", "列数 0 表示不限，不加上限");
 
         settings.grid_columns = 5;
         settings.tile_size = 80;
-        assert_eq!(settings.grid_template_columns(), "repeat(5, 80px)");
+        settings.tile_gap_x = 10;
+        // 列模板不随列数变——列数只在宽度上封顶，不写死轨道数
+        assert_eq!(settings.grid_template_columns(), "repeat(auto-fit, 80px)");
+        assert_eq!(settings.grid_max_width(), "calc(80px * 5 + 10px * 4)");
+    }
+
+    #[test]
+    fn system_theme_resolves() {
+        let mut settings = Settings::default();
+
+        settings.theme = "light".to_string();
+        assert_eq!(settings.effective_theme(Some(true)), "light", "定死浅色不看系统");
+
+        settings.theme = "system".to_string();
+        assert_eq!(settings.effective_theme(Some(true)), "dark");
+        assert_eq!(settings.effective_theme(Some(false)), "light");
+        assert_eq!(settings.effective_theme(None), "dark", "探不到时按深色");
     }
 }

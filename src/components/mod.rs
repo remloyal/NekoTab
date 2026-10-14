@@ -14,6 +14,7 @@ mod icon_tile;
 pub mod icons;
 mod modal;
 mod pager;
+mod quick_add_panel;
 mod quote;
 mod search_bar;
 mod settings_panel;

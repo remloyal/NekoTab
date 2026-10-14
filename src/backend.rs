@@ -8,8 +8,8 @@
 use dioxus::prelude::*;
 
 use crate::models::{
-    Bookmark, Engine, Group, ImportReport, NewBookmark, NewEngine, NewGroup, Quote, Settings,
-    TrashItem,
+    AddOutcome, Bookmark, Engine, Group, ImportReport, NewBookmark, NewEngine, NewGroup, Quote,
+    Settings, TrashItem,
 };
 
 /// 把 `ServerFnError` 转成可直接展示给用户的文案。
@@ -172,15 +172,44 @@ pub async fn list_bookmarks(query: String) -> Result<Vec<Bookmark>, ServerFnErro
         .map_err(|e| ServerFnError::new(format!("查询书签失败: {e}")))
 }
 
-/// 新增书签，返回新记录 id。新记录排在列表最前（`sort_order` 取当前最小值再减一）。
-#[server]
-pub async fn add_bookmark(input: NewBookmark) -> Result<i64, ServerFnError> {
-    use crate::db;
+/// 落库一条新书签，写之前按 URL 去重。新记录排在列表最前
+/// （`sort_order` 取当前最小值再减一）。
+///
+/// 去重口径与导入（[`import_bookmarks`]）一致：URL 字符串完全相同即算重复，
+/// **回收站里的也算**——否则同一网址会一边躺在回收站、一边又出现在列表里。
+/// 命中时返回已有记录的 id 且 `created == false`，由调用方决定怎么提示，
+/// 这里不报错（"已存在"不是失败，静默再插一条才是问题）。
+///
+/// 收一个 `pool` 参数而不是直接用全局连接池，是为了能在单测里喂内存库。
+#[cfg(feature = "server")]
+pub(crate) async fn insert_new_bookmark(
+    pool: &sqlx::SqlitePool,
+    title: String,
+    url: String,
+    description: String,
+    tags: String,
+    group_id: Option<i64>,
+    icon: String,
+) -> Result<AddOutcome, String> {
+    // 同一个 URL 有多条（历史遗留）时，优先命中正常条目，其次才是回收站里的
+    let existing: Option<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, deleted_at FROM bookmarks WHERE url = ? \
+         ORDER BY (deleted_at IS NOT NULL) ASC, id ASC LIMIT 1",
+    )
+    .bind(&url)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("检查重复失败: {e}"))?;
 
-    let (title, url, description, tags, group_id, icon) =
-        clean_bookmark(&input).await.map_err(ServerFnError::new)?;
+    if let Some((id, deleted_at)) = existing {
+        return Ok(AddOutcome {
+            id,
+            created: false,
+            in_trash: deleted_at.is_some(),
+        });
+    }
 
-    sqlx::query_scalar::<_, i64>(
+    let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO bookmarks (title, url, description, tags, group_id, icon, sort_order) \
          VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
@@ -191,9 +220,99 @@ pub async fn add_bookmark(input: NewBookmark) -> Result<i64, ServerFnError> {
     .bind(tags)
     .bind(group_id)
     .bind(icon)
-    .fetch_one(db::pool())
+    .fetch_one(pool)
     .await
-    .map_err(|e| ServerFnError::new(format!("保存书签失败: {e}")))
+    .map_err(|e| format!("保存书签失败: {e}"))?;
+
+    Ok(AddOutcome {
+        id,
+        created: true,
+        in_trash: false,
+    })
+}
+
+/// 快捷键添加入口（书签小工具 / `POST /api/bookmark`）共用的落库路径。
+///
+/// 与表单提交的区别：只要一个 URL，标题缺省时用主机名兜底，一律进「未分组」。
+#[cfg(feature = "server")]
+pub(crate) async fn quick_add(
+    pool: &sqlx::SqlitePool,
+    url: &str,
+    title: &str,
+    description: &str,
+) -> Result<AddOutcome, String> {
+    let url = url.trim();
+    if !crate::transfer::is_usable_url(url) {
+        return Err("URL 需以 http:// 或 https:// 开头".to_string());
+    }
+
+    let title = title.trim();
+    // 标题兜底用主机名：书签小工具通常带着页面标题来，但接口调用方未必
+    let title = if title.is_empty() {
+        crate::favicon::host_of(url).unwrap_or_else(|| url.to_string())
+    } else {
+        title.to_string()
+    };
+
+    insert_new_bookmark(
+        pool,
+        title,
+        url.to_string(),
+        description.trim().to_string(),
+        String::new(),
+        None,
+        String::new(),
+    )
+    .await
+}
+
+/// 改书签时确认这个 URL 没被别的条目占用。
+///
+/// 只在 URL **真的变了**时才查：去重是后加上的，历史数据里可能已经有重复，
+/// 若一概拦下，那些书签连改个标题都改不动。
+#[cfg(feature = "server")]
+pub(crate) async fn ensure_url_not_taken(
+    pool: &sqlx::SqlitePool,
+    id: i64,
+    url: &str,
+) -> Result<(), String> {
+    let previous: Option<String> = sqlx::query_scalar("SELECT url FROM bookmarks WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("读取原网址失败: {e}"))?;
+
+    // 没改动（或这条已不存在）就不必查重
+    if previous.as_deref() == Some(url) {
+        return Ok(());
+    }
+
+    let taken: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM bookmarks WHERE url = ? AND id <> ? LIMIT 1")
+            .bind(url)
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("检查重复失败: {e}"))?;
+
+    if taken.is_some() {
+        return Err("该网址已被另一条书签使用".to_string());
+    }
+
+    Ok(())
+}
+
+/// 新增书签，返回新记录 id（重复则不写入，见 [`insert_new_bookmark`]）。
+#[server]
+pub async fn add_bookmark(input: NewBookmark) -> Result<AddOutcome, ServerFnError> {
+    use crate::db;
+
+    let (title, url, description, tags, group_id, icon) =
+        clean_bookmark(&input).await.map_err(ServerFnError::new)?;
+
+    insert_new_bookmark(db::pool(), title, url, description, tags, group_id, icon)
+        .await
+        .map_err(ServerFnError::new)
 }
 
 /// 修改已有书签（标题 / URL / 描述 / 标签 / 分组 / 图标），不改排序位。
@@ -203,6 +322,10 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
 
     let (title, url, description, tags, group_id, icon) =
         clean_bookmark(&input).await.map_err(ServerFnError::new)?;
+
+    ensure_url_not_taken(db::pool(), id, &url)
+        .await
+        .map_err(ServerFnError::new)?;
 
     let affected = sqlx::query(
         "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
@@ -771,6 +894,26 @@ pub async fn save_settings(input: Settings) -> Result<(), ServerFnError> {
 }
 
 // ---------------------------------------------------------------------------
+// 快捷添加令牌
+// ---------------------------------------------------------------------------
+
+/// 读取快捷添加用的令牌，没有就现生成一个（首次打开设置面板即就位）。
+#[server]
+pub async fn get_api_token() -> Result<String, ServerFnError> {
+    crate::quickadd::ensure_api_token(crate::db::pool())
+        .await
+        .map_err(ServerFnError::new)
+}
+
+/// 换一个新令牌。旧的书签小工具随之失效。
+#[server]
+pub async fn regenerate_api_token() -> Result<String, ServerFnError> {
+    crate::quickadd::regenerate_api_token(crate::db::pool())
+        .await
+        .map_err(ServerFnError::new)
+}
+
+// ---------------------------------------------------------------------------
 // 导入 / 导出
 // ---------------------------------------------------------------------------
 
@@ -1312,5 +1455,140 @@ mod tests {
         assert_eq!(normalize_prefix("b-i-n-g"), "b-i-n-g");
         assert_eq!(normalize_prefix("a b/c"), "abc");
         assert_eq!(normalize_prefix("   "), "");
+    }
+
+    // ---- 新增去重 ----
+
+    async fn count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks")
+            .fetch_one(pool)
+            .await
+            .expect("count")
+    }
+
+    #[tokio::test]
+    async fn existing_url_is_not_inserted_again() {
+        let pool = seed().await;
+
+        let hit = insert_new_bookmark(
+            &pool,
+            "Rust 官网（重复）".to_string(),
+            "https://rust-lang.org".to_string(),
+            String::new(),
+            String::new(),
+            None,
+            String::new(),
+        )
+        .await
+        .expect("insert");
+
+        assert!(!hit.created, "同一个网址不该写第二条");
+        assert_eq!(hit.id, 1, "应返回已有记录的 id");
+        assert!(!hit.in_trash);
+        assert_eq!(count(&pool).await, 4, "总数不变");
+
+        // 全新网址照常写入
+        let fresh = insert_new_bookmark(
+            &pool,
+            "新的".to_string(),
+            "https://new.example".to_string(),
+            String::new(),
+            String::new(),
+            None,
+            String::new(),
+        )
+        .await
+        .expect("insert");
+        assert!(fresh.created);
+        assert_eq!(count(&pool).await, 5);
+    }
+
+    #[tokio::test]
+    async fn url_in_trash_also_counts_as_duplicate() {
+        let pool = seed().await;
+
+        sqlx::query("UPDATE bookmarks SET deleted_at = datetime('now') WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let hit = insert_new_bookmark(
+            &pool,
+            "Rust 官网".to_string(),
+            "https://rust-lang.org".to_string(),
+            String::new(),
+            String::new(),
+            None,
+            String::new(),
+        )
+        .await
+        .expect("insert");
+
+        assert!(!hit.created, "回收站里的同网址也算重复");
+        assert!(hit.in_trash, "要能区分出它躺在回收站里");
+        assert_eq!(count(&pool).await, 4);
+    }
+
+    #[tokio::test]
+    async fn quick_add_falls_back_to_host_as_title() {
+        let pool = seed().await;
+
+        let outcome = quick_add(&pool, "https://quick.example/some/page", "", "")
+            .await
+            .expect("quick add");
+        assert!(outcome.created);
+
+        let title: String = sqlx::query_scalar("SELECT title FROM bookmarks WHERE id = ?")
+            .bind(outcome.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(title, "quick.example", "没有标题时用主机名兜底");
+    }
+
+    #[tokio::test]
+    async fn editing_a_legacy_duplicate_url_is_still_allowed() {
+        let pool = seed().await;
+
+        // 造一条历史重复：与 #1 同 URL（去重是后加的，老库里可能就有这种）
+        sqlx::query("INSERT INTO bookmarks (title, url) VALUES (?, ?)")
+            .bind("Rust 官网（旧重复）")
+            .bind("https://rust-lang.org")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 不改 URL 的编辑必须放行，否则这种书签连标题都改不动
+        assert!(
+            ensure_url_not_taken(&pool, 1, "https://rust-lang.org")
+                .await
+                .is_ok(),
+            "URL 没变时不该查重"
+        );
+
+        // 改成别人的 URL 要拦住
+        assert!(
+            ensure_url_not_taken(&pool, 1, "https://dioxuslabs.com")
+                .await
+                .is_err(),
+            "撞上别的条目应拒绝"
+        );
+
+        // 改成全新的 URL 放行
+        assert!(
+            ensure_url_not_taken(&pool, 1, "https://brand-new.example")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn quick_add_rejects_non_http_urls() {
+        let pool = seed().await;
+
+        assert!(quick_add(&pool, "javascript:alert(1)", "x", "").await.is_err());
+        assert!(quick_add(&pool, "", "x", "").await.is_err());
+        assert!(quick_add(&pool, "chrome://bookmarks", "x", "").await.is_err());
+        assert_eq!(count(&pool).await, 4, "被拒绝的都没写进去");
     }
 }

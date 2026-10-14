@@ -264,6 +264,24 @@ pub fn Home() -> Element {
         }
     });
 
+    // ---- 主题 ----
+    // 系统深浅色偏好。`None` 表示还没探到——SSR 阶段就是这样，此时「跟随系统」
+    // 按深色渲染，客户端探到后再重渲染，于是首屏不会 hydration 失配。
+    #[cfg_attr(feature = "server", allow(unused_mut))]
+    let mut system_dark = use_signal(|| Option::<bool>::None);
+    #[cfg_attr(not(feature = "web"), allow(unused_variables))]
+    let theme_probe_once = use_hook(|| std::cell::Cell::new(false));
+    use_effect(move || {
+        #[cfg(feature = "web")]
+        if !theme_probe_once.get() {
+            theme_probe_once.set(true);
+            system_dark.set(Some(crate::dom::prefers_dark()));
+            // 系统换主题时跟着换（只在选「跟随系统」时才有可见效果）
+            crate::dom::watch_color_scheme(move |dark| system_dark.set(Some(dark)));
+        }
+    });
+    let theme = settings.effective_theme(system_dark());
+
     // 首屏把焦点送进页面。加载完成后 activeElement 是 body，而 body 不在
     // .stage-root 子树里，挂在根节点上的快捷键（Esc / Ctrl+K / 翻页）一个都收不到。
     // 只做一次，且仅在焦点确实无处可去时——别抢用户已经点好的位置。
@@ -313,12 +331,16 @@ pub fn Home() -> Element {
     };
 
     // ---- 布局：卡片尺寸/间距/列数都用 CSS 变量下发 ----
+    // 列数只封顶（--grid-max 是 max-width），轨道数本身始终自适应，
+    // 所以窄屏放不下时会自动换行，而不是横向溢出。
     let stage_style = format!(
-        "--tile-size: {}px; --tile-gap-x: {}px; --tile-gap-y: {}px; --grid-template: {};",
+        "--tile-size: {}px; --tile-gap-x: {}px; --tile-gap-y: {}px; \
+         --grid-template: {}; --grid-max: {};",
         settings.tile_size.clamp(56, 160),
         settings.tile_gap_x.clamp(0, 48),
         settings.tile_gap_y.clamp(0, 64),
         settings.grid_template_columns(),
+        settings.grid_max_width(),
     );
 
     // ---- 拖拽落位 ----
@@ -414,13 +436,13 @@ pub fn Home() -> Element {
         // 所以主题属性落在 .stage-root 上，body 的背景由 .bg 那一层负责铺。
         document::Meta {
             name: "theme-color",
-            content: if settings.theme == "light" { "#eef1f6" } else { "#0b0d13" },
+            content: if theme == "light" { "#eef1f6" } else { "#0b0d13" },
         }
 
         div {
             class: "stage-root",
             style: "{stage_style}",
-            "data-theme": "{settings.theme}",
+            "data-theme": "{theme}",
             // 键盘事件要靠焦点冒泡上来，所以根节点必须可获得焦点
             tabindex: "0",
 
@@ -530,6 +552,8 @@ pub fn Home() -> Element {
                 Clock {
                     show_lunar: settings.clock_show_lunar,
                     show_day: settings.clock_show_day,
+                    hour12: settings.clock_hour12,
+                    show_seconds: settings.clock_show_seconds,
                 }
             }
             if settings.show_quote {

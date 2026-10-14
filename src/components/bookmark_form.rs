@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use super::icon_picker::IconPicker;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
-use crate::models::{Bookmark, Group, NewBookmark};
+use crate::models::{AddOutcome, Bookmark, Group, NewBookmark};
 
 /// 书签表单，作为弹窗内容使用。
 ///
@@ -64,16 +64,31 @@ pub fn BookmarkForm(
             busy.set(true);
             error.set(None);
 
-            let result = match editing_id {
-                Some(id) => update_bookmark(id, input).await,
-                None => add_bookmark(input).await.map(|_| ()),
+            // 编辑走 update（无返回值），新增要知道是否真的写进去了，
+            // 统一成 AddOutcome 再分支
+            let outcome = match editing_id {
+                Some(id) => update_bookmark(id, input).await.map(|_| AddOutcome {
+                    id,
+                    created: true,
+                    in_trash: false,
+                }),
+                None => add_bookmark(input).await,
             };
 
-            match result {
-                Ok(()) => {
+            match outcome {
+                Ok(outcome) if outcome.created => {
                     // 先把 busy 复位，再回调关闭弹窗（避免组件卸载后写 signal）
                     busy.set(false);
                     on_saved.call(());
+                }
+                // 网址已存在：不关弹窗，把原因摆出来，好让人改网址或取消
+                Ok(outcome) => {
+                    error.set(Some(if outcome.in_trash {
+                        "该网址已在回收站里，没有重复添加".to_string()
+                    } else {
+                        "该网址已在列表中，没有重复添加".to_string()
+                    }));
+                    busy.set(false);
                 }
                 Err(e) => {
                     error.set(Some(error_text(&e)));

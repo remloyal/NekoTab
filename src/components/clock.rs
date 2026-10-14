@@ -10,7 +10,7 @@ const WEEKDAYS: [&str; 7] = [
 /// SSR 阶段无法得知"现在"，因此首屏渲染空串；`use_future` 只在客户端
 /// 持续刷新时间，这样服务端与客户端首次渲染结果一致，不会 hydration 失配。
 #[component]
-pub fn Clock(show_lunar: bool, show_day: bool) -> Element {
+pub fn Clock(show_lunar: bool, show_day: bool, hour12: bool, show_seconds: bool) -> Element {
     // 服务端分支里没有写入，`mut` 只在 web 下需要
     #[cfg_attr(feature = "server", allow(unused_mut))]
     let mut time = use_signal(String::new);
@@ -29,12 +29,29 @@ pub fn Clock(show_lunar: bool, show_day: bool) -> Element {
                 now.get_date(),
             );
 
-            time.set(format!(
-                "{:02}:{:02}:{:02}",
-                now.get_hours(),
-                now.get_minutes(),
-                now.get_seconds()
-            ));
+            let hours = now.get_hours();
+            let minutes = now.get_minutes();
+            let seconds = now.get_seconds();
+
+            // 12 小时制里 0 点要显示成 12 点；「上午 / 下午」放在最前面，
+            // 中文界面下比尾随的 AM/PM 顺眼
+            let clock = if hour12 {
+                let hour = match hours % 12 {
+                    0 => 12,
+                    h => h,
+                };
+                let half = if hours < 12 { "上午" } else { "下午" };
+                if show_seconds {
+                    format!("{half} {hour:02}:{minutes:02}:{seconds:02}")
+                } else {
+                    format!("{half} {hour:02}:{minutes:02}")
+                }
+            } else if show_seconds {
+                format!("{hours:02}:{minutes:02}:{seconds:02}")
+            } else {
+                format!("{hours:02}:{minutes:02}")
+            };
+            time.set(clock);
 
             date.set(format!(
                 "{year}年{month}月{day}日 {}",

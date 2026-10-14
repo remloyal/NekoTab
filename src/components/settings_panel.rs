@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use super::group_settings::GroupSettings;
+use super::quick_add_panel::QuickAddPanel;
 use super::trash_panel::TrashPanel;
 use super::wallpaper_panel::WallpaperPanel;
 use crate::backend::{clear_icon_cache, error_text, import_bookmarks, save_settings};
@@ -42,17 +43,19 @@ enum Section {
     Clock,
     Behavior,
     Data,
+    QuickAdd,
     Groups,
     Trash,
 }
 
 /// `(分区, 菜单文字)`。顺序即左侧菜单的显示顺序。
-const SECTIONS: [(Section, &str); 7] = [
+const SECTIONS: [(Section, &str); 8] = [
     (Section::Appearance, "外观"),
     (Section::Layout, "卡片与布局"),
     (Section::Clock, "时钟与一言"),
     (Section::Behavior, "打开与翻页"),
     (Section::Data, "数据"),
+    (Section::QuickAdd, "快捷添加"),
     (Section::Groups, "分组管理"),
     (Section::Trash, "回收站"),
 ];
@@ -221,7 +224,11 @@ pub fn SettingsPanel(
                                             class: if draft().theme == name { "segment active" } else { "segment" },
                                             r#type: "button",
                                             onclick: move |_| draft.with_mut(|s| s.theme = name.to_string()),
-                                            if name == "dark" { "深色" } else { "浅色" }
+                                            match name {
+                                                "system" => "跟随系统",
+                                                "light" => "浅色",
+                                                _ => "深色",
+                                            }
                                         }
                                     }
                                 }
@@ -311,7 +318,7 @@ pub fn SettingsPanel(
                             h3 { class: "panel-heading", "效果预览" }
                             div {
                                 class: "preview-grid",
-                                style: "grid-template-columns: repeat(auto-fit, {draft().tile_size}px); gap: {draft().tile_gap_y}px {draft().tile_gap_x}px;",
+                                style: "grid-template-columns: repeat(auto-fit, {draft().tile_size}px); gap: {draft().tile_gap_y}px {draft().tile_gap_x}px; max-width: {draft().grid_max_width()};",
                                 for label in ["A", "B", "C"] {
                                     div { class: "preview-tile", style: "width: {draft().tile_size}px;",
                                         div {
@@ -325,7 +332,7 @@ pub fn SettingsPanel(
                             }
                             p { class: "field-hint",
                                 if draft().grid_columns > 0 {
-                                    "每行固定 {draft().grid_columns} 列（列数设为 0 时按宽度自适应）。"
+                                    "每行最多 {draft().grid_columns} 列，放不下时自动换行。"
                                 } else {
                                     "列数自适应：按容器宽度决定每行放几个。"
                                 }
@@ -381,7 +388,7 @@ pub fn SettingsPanel(
                             }
 
                             label { class: "field",
-                                span { class: "field-label", "每行列数　（0 = 自适应）" }
+                                span { class: "field-label", "每行最大列数　（0 = 不限）" }
                                 input {
                                     class: "input",
                                     r#type: "number",
@@ -392,7 +399,7 @@ pub fn SettingsPanel(
                                         s.grid_columns = e.value().parse().unwrap_or(0)
                                     }),
                                 }
-                                p { class: "field-hint", "设成固定列数后，窗口变窄也不会换行，可能横向溢出。" }
+                                p { class: "field-hint", "最多排几列；窗口变窄放不下时会自动换行，不会横向溢出。" }
                             }
                         }
                     },
@@ -429,6 +436,25 @@ pub fn SettingsPanel(
                                 }
                                 span { "显示第几天 / 第几周" }
                             }
+
+                            label { class: "switch",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: draft().clock_show_seconds,
+                                    onchange: move |e| draft.with_mut(|s| s.clock_show_seconds = e.checked()),
+                                }
+                                span { "显示秒" }
+                            }
+
+                            label { class: "switch",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: draft().clock_hour12,
+                                    onchange: move |e| draft.with_mut(|s| s.clock_hour12 = e.checked()),
+                                }
+                                span { "12 小时制" }
+                            }
+                            p { class: "field-hint", "关闭为 24 小时制；开启后时间前面带「上午 / 下午」。" }
 
                             label { class: "switch",
                                 input {
@@ -612,6 +638,11 @@ pub fn SettingsPanel(
                             }
                             p { class: "field-hint", "含分组与顺序，可直接粘回上方文本框恢复。" }
                         }
+                    },
+
+                    // ---------- 快捷添加 ----------
+                    Section::QuickAdd => rsx! {
+                        QuickAddPanel {}
                     },
 
                     // ---------- 分组管理 ----------

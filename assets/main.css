@@ -22,11 +22,12 @@
     --scrollbar-thumb: rgba(255, 255, 255, 0.26);
     --scrollbar-thumb-hover: rgba(255, 255, 255, 0.44);
 
-    /* 由 home.rs 按设置覆盖：卡片尺寸、间距、列数模板 */
+    /* 由 home.rs 按设置覆盖：卡片尺寸、间距、列模板、每行最大列数换算的宽度上限 */
     --tile-size: 96px;
     --tile-gap-x: 8px;
     --tile-gap-y: 20px;
     --grid-template: repeat(auto-fit, 96px);
+    --grid-max: none;
 }
 
 /* 浅色主题：只换变量。作用域挂在 .stage-root 上（见 home.rs 的说明）。 */
@@ -663,6 +664,10 @@ body {
     justify-content: center;
     gap: var(--tile-gap-y) var(--tile-gap-x);
     width: 100%;
+    /* 每行最大列数只在宽度上封顶（见 models.rs 的 grid_max_width），
+       轨道数始终自适应，所以窄屏放不下时自动换行；配上 auto 外边距居中 */
+    max-width: var(--grid-max);
+    margin-inline: auto;
 }
 
 .tile {
@@ -1616,6 +1621,48 @@ select.input {
 .wallpaper-actions .icon-btn {
     padding: 2px 6px;
     font-size: 11.5px;
+}
+
+/* ---------- 快捷添加（书签小工具 + 令牌） ---------- */
+.quick-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+/* 可拖到书签栏的链接。做成"按钮的样子"是为了让人有拖的直觉 */
+.bookmarklet {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 14px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text);
+    text-decoration: none;
+    background: var(--panel-solid-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    cursor: grab;
+}
+
+.bookmarklet:hover {
+    background: var(--hover);
+}
+
+.quick-token {
+    flex: 1 1 200px;
+    min-width: 0;
+    padding: 7px 10px;
+    overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--field-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
 }
 
 /* ---------- 搜索引擎设置 ---------- */
