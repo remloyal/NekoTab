@@ -592,31 +592,9 @@ body {
     background: var(--accent);
 }
 
-/* ---------- 标签筛选条与标签 chip ---------- */
-/* 标签是检索词维度，和分组（归属）叠加生效。标签多时横向滚动，不占纵向空间。
-   这一条刻意做得比分组标签页"轻"：分组是主导航（居中、加大、选中带下划线），
-   标签只是次要筛选（靠左、更小、更淡、以「标签」二字开头点明身份）。 */
-.tag-filter {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    width: 100%;
-    margin: -16px 0 20px;
-    padding-bottom: 4px;
-    overflow-x: auto;
-    scrollbar-width: thin;
-}
-
-.tag-filter-label {
-    flex: 0 0 auto;
-    margin-right: 6px;
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    color: var(--text);
-    opacity: 0.4;
-    user-select: none;
-}
-
+/* ---------- 标签 chip（只有一个用处：表单里的标签选择器） ---------- */
+/* 首页上不再有标签筛选条：分类只由分组承担，再摆一排标签就又把"标签即分类"
+   请回来了。标签只剩检索词的用途——搜索框会匹配它，表单里可选可新增。 */
 .tag-chip {
     display: inline-flex;
     align-items: center;
@@ -628,8 +606,6 @@ body {
     color: var(--text);
     opacity: 0.78;
     white-space: nowrap;
-    /* 留一层淡底：壁纸是亮的时纯文字会糊在背景上，淡底 + 不加边是"比分组轻、
-       但仍然读得清"的折中 */
     background: var(--hover-soft);
     border: 1px solid transparent;
     border-radius: 999px;
@@ -648,13 +624,6 @@ body {
     color: var(--accent);
     border-color: var(--accent);
     background: var(--accent-soft);
-}
-
-/* 「清除」只在真的筛了标签时才出现，样式压得比普通 chip 更淡，
-   免得它自己也像个可选项。 */
-.tag-chip-clear {
-    opacity: 0.6;
-    border-color: var(--border);
 }
 
 .tag-chip-count {

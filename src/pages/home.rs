@@ -27,7 +27,7 @@ enum ModalState {
     BatchMove,
 }
 
-/// 汇总所有书签的标签与条数，按名称排序。标签选择器与标签筛选条都用它。
+/// 汇总所有书签的标签与条数，按名称排序。给表单里的标签选择器当候选项。
 fn collect_tags(items: &[Bookmark]) -> Vec<(String, usize)> {
     let mut counts: Vec<(String, usize)> = Vec::new();
 
@@ -47,11 +47,6 @@ fn collect_tags(items: &[Bookmark]) -> Vec<(String, usize)> {
 
     counts.sort_by(|a, b| a.0.cmp(&b.0));
     counts
-}
-
-/// 一条书签是否带某个标签。
-fn has_tag(bookmark: &Bookmark, tag: &str) -> bool {
-    bookmark.tags.split(',').any(|t| t.trim() == tag)
 }
 
 /// 把 `dragged` 挪到 `target` 的位置（在传进来的完整顺序上做）。
@@ -181,7 +176,6 @@ pub fn Home() -> Element {
     let mut query = use_signal(String::new);
     let mut search_mode = use_signal(|| SearchMode::Web);
     let mut active_group = use_signal(String::new);
-    let mut active_tag = use_signal(String::new);
     let mut page = use_signal(|| 0usize);
     let mut editing = use_signal(|| false);
     let mut selecting = use_signal(|| false);
@@ -252,17 +246,9 @@ pub fn Home() -> Element {
     };
     let filter = parse_filter(&active_value);
 
-    // 标签：与分组是两个维度——分组管归属（一条只属于一个），标签是检索词（可多个）。
-    // 选中的标签若在结果里已不存在，同样回落到"不筛标签"。
+    // 标签不再是首页上的一个筛选维度——分类只有分组一个入口，见 README。
+    // 这里收集标签只为「表单里的标签选择器」提供候选项。
     let known_tags = collect_tags(&keyword_matched);
-    let selected_tag = active_tag();
-    let active_tag_value = if selected_tag.is_empty()
-        || known_tags.iter().any(|(name, _)| name == &selected_tag)
-    {
-        selected_tag
-    } else {
-        String::new()
-    };
 
     let matched: Vec<Bookmark> = keyword_matched
         .into_iter()
@@ -271,7 +257,6 @@ pub fn Home() -> Element {
             Filter::Ungrouped => effective_group(item, &known_group_ids).is_none(),
             Filter::Group(id) => effective_group(item, &known_group_ids) == Some(id),
         })
-        .filter(|item| active_tag_value.is_empty() || has_tag(item, &active_tag_value))
         .collect();
 
     // ---- 分页 ----
@@ -640,49 +625,6 @@ pub fn Home() -> Element {
                                 active_group.set(tag);
                                 page.set(0);
                             },
-                        }
-                    }
-
-                    // 标签筛选条。标签是检索词维度，和上面的分组（归属）叠加生效；
-                    // 标签多时这一条横向滚动，不占纵向空间。
-                    //
-                    // 开头那个「标签」字条是必要的：这一条紧挨着分组标签页，不加说明
-                    // 很容易被看成第二排分组（何况导入的标签常常就是文件夹名）。
-                    if !known_tags.is_empty() {
-                        div { class: "tag-filter",
-                            span { class: "tag-filter-label", "标签" }
-                            if !active_tag_value.is_empty() {
-                                button {
-                                    class: "tag-chip tag-chip-clear",
-                                    r#type: "button",
-                                    title: "清除标签筛选",
-                                    onclick: move |_| {
-                                        active_tag.set(String::new());
-                                        page.set(0);
-                                    },
-                                    "清除 ✕"
-                                }
-                            }
-                            for (tag, count) in known_tags.clone() {
-                                button {
-                                    key: "{tag}",
-                                    class: if tag == active_tag_value { "tag-chip active" } else { "tag-chip" },
-                                    r#type: "button",
-                                    title: if tag == active_tag_value { "取消标签筛选" } else { "按该标签筛选" },
-                                    onclick: {
-                                        let tag = tag.clone();
-                                        let current = active_tag_value.clone();
-                                        move |_| {
-                                            // 再点一次选中项＝取消筛选
-                                            let next = if tag == current { String::new() } else { tag.clone() };
-                                            active_tag.set(next);
-                                            page.set(0);
-                                        }
-                                    },
-                                    "{tag}"
-                                    span { class: "tag-chip-count", "{count}" }
-                                }
-                            }
                         }
                     }
 
