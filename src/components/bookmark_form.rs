@@ -1,7 +1,6 @@
 use dioxus::prelude::*;
 
 use super::icon_picker::IconPicker;
-use super::tag_picker::TagPicker;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
 use crate::models::{Bookmark, Group, NewBookmark};
 
@@ -13,8 +12,6 @@ use crate::models::{Bookmark, Group, NewBookmark};
 pub fn BookmarkForm(
     bookmark: Option<Bookmark>,
     groups: Vec<Group>,
-    /// 库里已有的标签与条数，供标签选择器展示
-    known_tags: Vec<(String, usize)>,
     /// 新增时的默认分组（跟着当前筛选走，省得每次都手工选）
     default_group: Option<i64>,
     on_saved: EventHandler<()>,
@@ -33,8 +30,10 @@ pub fn BookmarkForm(
             .map(|b| b.description.clone())
             .unwrap_or_default()
     });
-    let mut tags = use_signal(|| existing.as_ref().map(|b| b.tags.clone()).unwrap_or_default());
     let mut icon = use_signal(|| existing.as_ref().map(|b| b.icon.clone()).unwrap_or_default());
+    // 标签不再是界面上的东西（分类只由分组承担），但库里已有的值要原样带过去：
+    // update 会整行覆盖，这里若不回传就等于把老数据清空了。
+    let existing_tags = existing.as_ref().map(|b| b.tags.clone()).unwrap_or_default();
     // 下拉框的值统一用字符串：空串即"未分组"，这样 select 的 value 不必处理 Option
     let mut group_id = use_signal(|| {
         existing
@@ -56,7 +55,7 @@ pub fn BookmarkForm(
             title: title(),
             url: url(),
             description: description(),
-            tags: tags(),
+            tags: existing_tags.clone(),
             group_id: group_id().parse().ok(),
             icon: icon(),
         };
@@ -136,18 +135,6 @@ pub fn BookmarkForm(
                 }
                 p { class: "field-hint",
                     "分组决定卡片出现在哪个分类标签页下（一条书签只属于一个分组）；在设置 → 分组管理里增删。"
-                }
-            }
-
-            div { class: "field",
-                span { class: "field-label", "标签" }
-                TagPicker {
-                    value: tags(),
-                    known: known_tags.clone(),
-                    on_change: move |v: String| tags.set(v),
-                }
-                p { class: "field-hint",
-                    "标签是检索词，一条可以带多个，搜索框会匹配它；它不是分类，分类用上面的「分组」。"
                 }
             }
 

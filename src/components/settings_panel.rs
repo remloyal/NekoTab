@@ -539,7 +539,7 @@ pub fn SettingsPanel(
                                 }
                                 p { class: "field-hint",
                                     "浏览器 HTML 的**文件夹会变成分组**（取第一层非容器文件夹，"
-                                    "「书签栏 / Bookmarks bar」这类容器会被跳过），完整路径仍写进标签；"
+                                    "「书签栏 / Bookmarks bar」这类容器会被跳过）；"
                                     "JSON 备份按里面的分组名还原，不存在就自动建。按 URL 去重。"
                                 }
                             }
@@ -610,7 +610,7 @@ pub fn SettingsPanel(
                                 download: "nekotab-bookmarks.json",
                                 "下载 JSON 备份"
                             }
-                            p { class: "field-hint", "含标签、分组与顺序，可直接粘回上方文本框恢复。" }
+                            p { class: "field-hint", "含分组与顺序，可直接粘回上方文本框恢复。" }
                         }
                     },
 

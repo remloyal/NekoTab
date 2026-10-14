@@ -142,29 +142,6 @@ fn split_tags(raw: &str) -> Vec<String> {
     out
 }
 
-/// 批量打标签：在现有标签上叠加，已存在的跳过。
-#[cfg(feature = "server")]
-fn merge_tags(current: &str, add: &str) -> String {
-    let mut tags = split_tags(current);
-    for tag in split_tags(add) {
-        if !tags.iter().any(|existing| existing == &tag) {
-            tags.push(tag);
-        }
-    }
-    tags.join(",")
-}
-
-/// 批量去标签。
-#[cfg(feature = "server")]
-fn drop_tags(current: &str, remove: &str) -> String {
-    let doomed = split_tags(remove);
-    split_tags(current)
-        .into_iter()
-        .filter(|tag| !doomed.iter().any(|d| d == tag))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 // ---------------------------------------------------------------------------
 // 书签
 // ---------------------------------------------------------------------------
@@ -320,71 +297,6 @@ pub async fn delete_bookmarks(ids: Vec<i64>) -> Result<usize, ServerFnError> {
     tx.commit()
         .await
         .map_err(|e| ServerFnError::new(format!("提交删除失败: {e}")))?;
-
-    Ok(affected)
-}
-
-/// 批量打标签 / 去标签。`mode` 为 `"add"` 或 `"remove"`。
-///
-/// 只动列表里的这几条，其余标签保持不变。
-#[server]
-pub async fn tag_bookmarks(
-    ids: Vec<i64>,
-    tags: String,
-    mode: String,
-) -> Result<usize, ServerFnError> {
-    use crate::db;
-
-    let tags = tags.trim().to_string();
-    if ids.is_empty() || tags.is_empty() {
-        return Ok(0);
-    }
-
-    let removing = match mode.as_str() {
-        "add" => false,
-        "remove" => true,
-        other => return Err(ServerFnError::new(format!("未知的标签操作: {other}"))),
-    };
-
-    let pool = db::pool();
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
-
-    let mut affected = 0usize;
-    for id in &ids {
-        let current: Option<String> = sqlx::query_scalar("SELECT tags FROM bookmarks WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| ServerFnError::new(format!("读取标签失败: {e}")))?;
-
-        let Some(current) = current else { continue };
-
-        let next = if removing {
-            drop_tags(&current, &tags)
-        } else {
-            merge_tags(&current, &tags)
-        };
-
-        if next == current {
-            continue;
-        }
-
-        sqlx::query("UPDATE bookmarks SET tags = ? WHERE id = ?")
-            .bind(next)
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| ServerFnError::new(format!("更新标签失败: {e}")))?;
-
-        affected += 1;
-    }
-
-    tx.commit()
-        .await
-        .map_err(|e| ServerFnError::new(format!("提交标签失败: {e}")))?;
 
     Ok(affected)
 }
@@ -1331,14 +1243,9 @@ mod tests {
     }
 
     #[test]
-    fn tags_normalize_and_merge() {
+    fn tags_normalize() {
         assert_eq!(normalize_tags(" rust , web ,, "), "rust,web");
         assert_eq!(normalize_tags("rust,rust,web"), "rust,web", "重复项去掉");
-        assert_eq!(merge_tags("rust", "web, rust"), "rust,web");
-        assert_eq!(merge_tags("", "a,b"), "a,b");
-        assert_eq!(drop_tags("a,b,c", "b"), "a,c");
-        assert_eq!(drop_tags("a,b", "x"), "a,b", "删不存在的标签是空操作");
-        assert_eq!(drop_tags("a,b", "a,b"), "");
     }
 
     #[test]

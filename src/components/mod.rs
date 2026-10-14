@@ -17,11 +17,10 @@ mod pager;
 mod quote;
 mod search_bar;
 mod settings_panel;
-mod tag_picker;
 mod trash_panel;
 mod wallpaper_panel;
 
-pub use batch::{BatchMoveList, BatchTagForm};
+pub use batch::BatchMoveList;
 pub use bookmark_form::BookmarkForm;
 pub use bookmark_grid::BookmarkGrid;
 pub use clock::Clock;

@@ -4,10 +4,10 @@ use dioxus::prelude::*;
 
 use crate::backend::{
     delete_bookmark, delete_bookmarks, delete_engine, get_settings, list_bookmarks, list_engines,
-    list_groups, move_bookmarks, reorder_bookmarks, set_active_engine, tag_bookmarks,
+    list_groups, move_bookmarks, reorder_bookmarks, set_active_engine,
 };
 use crate::components::{
-    build_tabs, group_value, parse_filter, BatchMoveList, BatchTagForm, BookmarkForm, BookmarkGrid,
+    build_tabs, group_value, parse_filter, BatchMoveList, BookmarkForm, BookmarkGrid,
     Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs, Modal, Pager,
     QuoteLine, SearchBar, SearchMode, SettingsPanel, GROUP_UNGROUPED, SEARCH_INPUT_ID,
 };
@@ -23,30 +23,7 @@ enum ModalState {
     EngineSettings,
     /// 删除确认。单条与批量共用：`ids` 是要删的集合，`message` 是文案。
     ConfirmDelete { ids: Vec<i64>, message: String },
-    BatchTag,
     BatchMove,
-}
-
-/// 汇总所有书签的标签与条数，按名称排序。给表单里的标签选择器当候选项。
-fn collect_tags(items: &[Bookmark]) -> Vec<(String, usize)> {
-    let mut counts: Vec<(String, usize)> = Vec::new();
-
-    for item in items {
-        for tag in item.tags.split(',') {
-            let tag = tag.trim();
-            if tag.is_empty() {
-                continue;
-            }
-
-            match counts.iter_mut().find(|(name, _)| name == tag) {
-                Some((_, count)) => *count += 1,
-                None => counts.push((tag.to_string(), 1)),
-            }
-        }
-    }
-
-    counts.sort_by(|a, b| a.0.cmp(&b.0));
-    counts
 }
 
 /// 把 `dragged` 挪到 `target` 的位置（在传进来的完整顺序上做）。
@@ -245,10 +222,6 @@ pub fn Home() -> Element {
         String::new()
     };
     let filter = parse_filter(&active_value);
-
-    // 标签不再是首页上的一个筛选维度——分类只有分组一个入口，见 README。
-    // 这里收集标签只为「表单里的标签选择器」提供候选项。
-    let known_tags = collect_tags(&keyword_matched);
 
     let matched: Vec<Bookmark> = keyword_matched
         .into_iter()
@@ -723,13 +696,6 @@ pub fn Home() -> Element {
                         class: "btn-ghost",
                         r#type: "button",
                         disabled: selected_count == 0,
-                        onclick: move |_| modal.set(ModalState::BatchTag),
-                        "打标签"
-                    }
-                    button {
-                        class: "btn-ghost",
-                        r#type: "button",
-                        disabled: selected_count == 0,
                         onclick: move |_| modal.set(ModalState::BatchMove),
                         "移到分组"
                     }
@@ -854,7 +820,6 @@ pub fn Home() -> Element {
                         BookmarkForm {
                             bookmark: None,
                             groups: groups.clone(),
-                            known_tags: known_tags.clone(),
                             // 当前就停在某个分组下时，默认归到那一组
                             default_group: match filter {
                                 Filter::Group(id) => Some(id),
@@ -878,7 +843,6 @@ pub fn Home() -> Element {
                             key: "{bookmark.id}",
                             bookmark: Some(bookmark.clone()),
                             groups: groups.clone(),
-                            known_tags: known_tags.clone(),
                             default_group: None,
                             on_cancel: move |_| modal.set(ModalState::None),
                             on_saved: move |_| {
@@ -924,27 +888,6 @@ pub fn Home() -> Element {
                             let ids = ids.clone();
                             run_delete(ids);
                         },
-                    }
-                },
-                ModalState::BatchTag => rsx! {
-                    Modal {
-                        title: "批量打标签",
-                        on_close: move |_| modal.set(ModalState::None),
-                        BatchTagForm {
-                            count: selected_count,
-                            on_cancel: move |_| modal.set(ModalState::None),
-                            on_submit: move |(tags, mode): (String, String)| {
-                                let ids = selected();
-                                spawn(async move {
-                                    if tag_bookmarks(ids, tags, mode).await.is_ok() {
-                                        modal.set(ModalState::None);
-                                        selected.set(Vec::new());
-                                        refresh.set(refresh() + 1);
-                                        groups_refresh.set(groups_refresh() + 1);
-                                    }
-                                });
-                            },
-                        }
                     }
                 },
                 ModalState::BatchMove => rsx! {
