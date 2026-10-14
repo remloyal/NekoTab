@@ -151,6 +151,13 @@ const CONTAINER_FOLDERS: [&str; 16] = [
     "bookmarks",
 ];
 
+/// 该文件夹名是不是浏览器自带的容器（不表达用户的分类意图）。
+fn is_container_folder(folder: &str) -> bool {
+    CONTAINER_FOLDERS
+        .iter()
+        .any(|container| folder.eq_ignore_ascii_case(container))
+}
+
 /// 由文件夹路径推出分组名。
 ///
 /// 取**第一个非容器文件夹**：那才是用户真正的顶层分类（用整条路径当分组名的话，
@@ -160,13 +167,23 @@ const CONTAINER_FOLDERS: [&str; 16] = [
 fn group_from_folders(folders: &[String]) -> String {
     folders
         .iter()
-        .find(|folder| {
-            !CONTAINER_FOLDERS
-                .iter()
-                .any(|container| folder.eq_ignore_ascii_case(container))
-        })
+        .find(|folder| !is_container_folder(folder))
         .cloned()
         .unwrap_or_default()
+}
+
+/// 由文件夹路径推出标签。
+///
+/// 容器文件夹要剔掉：它在分组那边本来就被跳过了，留着当标签只会凭空多出一堆
+/// 「书签栏」——而这一条标签对检索毫无用处（它不代表任何内容），却让标签栏
+/// 看起来像第二排分组。
+fn tags_from_folders(folders: &[String]) -> String {
+    folders
+        .iter()
+        .filter(|folder| !is_container_folder(folder))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// 解析浏览器导出的 Netscape 书签 HTML。
@@ -241,7 +258,7 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
                         url: href,
                         description: String::new(),
                         // 完整路径进标签（检索用），首层分类进分组（归属用）
-                        tags: folders.join(","),
+                        tags: tags_from_folders(&folders),
                         group: group_from_folders(&folders),
                         icon: String::new(),
                         inline_icon,
@@ -586,6 +603,31 @@ mod tests {
         assert_eq!(by("https://a.com"), "", "容器下直接放的书签归未分组");
         assert_eq!(by("https://b.com"), "开发", "容器被跳过，取下层真实分类");
         assert_eq!(by("https://c.com"), "", "英文容器名同样跳过");
+    }
+
+    /// 容器文件夹也不该变成标签。
+    ///
+    /// 标签栏看起来像"第二排分组"的主要来源就是它：整个收藏夹都在「书签栏」下，
+    /// 于是每条书签都带上一个「书签栏」标签——既不表达内容，检索也永远命中全集。
+    #[test]
+    fn skips_container_folders_in_tags() {
+        let html = r#"<DL><p>
+            <DT><H3>书签栏</H3>
+            <DL><p>
+                <DT><A HREF="https://a.com">A</A>
+                <DT><H3>开发</H3>
+                <DL><p>
+                    <DT><H3>前端</H3>
+                    <DL><p><DT><A HREF="https://b.com">B</A></DL><p>
+                </DL><p>
+            </DL><p>
+        </DL><p>"#;
+
+        let items = parse_netscape(html);
+        let tags = |url: &str| items.iter().find(|i| i.url == url).unwrap().tags.clone();
+
+        assert_eq!(tags("https://a.com"), "", "容器名不进标签");
+        assert_eq!(tags("https://b.com"), "开发,前端", "容器之外的路径照旧全进标签");
     }
 
     /// 容器名大小写不敏感；不是容器的首层照常当分组。

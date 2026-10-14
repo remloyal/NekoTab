@@ -593,31 +593,45 @@ body {
 }
 
 /* ---------- 标签筛选条与标签 chip ---------- */
-/* 标签是检索词维度，和分组（归属）叠加生效。标签多时横向滚动，不占纵向空间。 */
+/* 标签是检索词维度，和分组（归属）叠加生效。标签多时横向滚动，不占纵向空间。
+   这一条刻意做得比分组标签页"轻"：分组是主导航（居中、加大、选中带下划线），
+   标签只是次要筛选（靠左、更小、更淡、以「标签」二字开头点明身份）。 */
 .tag-filter {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 2px;
     width: 100%;
-    margin: -12px 0 22px;
+    margin: -16px 0 20px;
     padding-bottom: 4px;
     overflow-x: auto;
     scrollbar-width: thin;
+}
+
+.tag-filter-label {
+    flex: 0 0 auto;
+    margin-right: 6px;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--text);
+    opacity: 0.4;
+    user-select: none;
 }
 
 .tag-chip {
     display: inline-flex;
     align-items: center;
     flex: 0 0 auto;
-    gap: 5px;
-    padding: 4px 10px;
+    gap: 4px;
+    padding: 3px 9px;
     font: inherit;
-    font-size: 12.5px;
+    font-size: 12px;
     color: var(--text);
-    opacity: 0.7;
+    opacity: 0.78;
     white-space: nowrap;
+    /* 留一层淡底：壁纸是亮的时纯文字会糊在背景上，淡底 + 不加边是"比分组轻、
+       但仍然读得清"的折中 */
     background: var(--hover-soft);
-    border: 1px solid var(--border);
+    border: 1px solid transparent;
     border-radius: 999px;
     cursor: pointer;
     transition: color 0.12s, border-color 0.12s, background 0.12s, opacity 0.12s;
@@ -625,6 +639,7 @@ body {
 
 .tag-chip:hover {
     opacity: 1;
+    border-color: var(--border);
     background: var(--hover);
 }
 
@@ -633,6 +648,13 @@ body {
     color: var(--accent);
     border-color: var(--accent);
     background: var(--accent-soft);
+}
+
+/* 「清除」只在真的筛了标签时才出现，样式压得比普通 chip 更淡，
+   免得它自己也像个可选项。 */
+.tag-chip-clear {
+    opacity: 0.6;
+    border-color: var(--border);
 }
 
 .tag-chip-count {

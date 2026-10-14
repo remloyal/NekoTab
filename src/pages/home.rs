@@ -645,16 +645,23 @@ pub fn Home() -> Element {
 
                     // 标签筛选条。标签是检索词维度，和上面的分组（归属）叠加生效；
                     // 标签多时这一条横向滚动，不占纵向空间。
+                    //
+                    // 开头那个「标签」字条是必要的：这一条紧挨着分组标签页，不加说明
+                    // 很容易被看成第二排分组（何况导入的标签常常就是文件夹名）。
                     if !known_tags.is_empty() {
                         div { class: "tag-filter",
-                            button {
-                                class: if active_tag_value.is_empty() { "tag-chip active" } else { "tag-chip" },
-                                r#type: "button",
-                                onclick: move |_| {
-                                    active_tag.set(String::new());
-                                    page.set(0);
-                                },
-                                "全部标签"
+                            span { class: "tag-filter-label", "标签" }
+                            if !active_tag_value.is_empty() {
+                                button {
+                                    class: "tag-chip tag-chip-clear",
+                                    r#type: "button",
+                                    title: "清除标签筛选",
+                                    onclick: move |_| {
+                                        active_tag.set(String::new());
+                                        page.set(0);
+                                    },
+                                    "清除 ✕"
+                                }
                             }
                             for (tag, count) in known_tags.clone() {
                                 button {
