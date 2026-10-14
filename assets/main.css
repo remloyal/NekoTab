@@ -484,6 +484,86 @@ body {
     opacity: 0.42;
 }
 
+/* ---------- 搜索联想面板 ---------- */
+/* 吊在整条搜索框下面。本地书签命中在前、「书签」标签，引擎联想在后、「搜索」标签，
+   所以每一行都自带一个去向说明，不必猜点了会怎样。 */
+.suggest-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    /* 高于 .search-box(41) 与 .engine-menu(42)：它俩可能同时在屏幕上 */
+    z-index: 43;
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: 0 18px 48px var(--shadow-strong);
+    backdrop-filter: blur(12px);
+}
+
+.suggest-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 14px;
+    color: var(--text);
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: 9px;
+    cursor: pointer;
+}
+
+.suggest-item.active,
+.suggest-item:hover {
+    background: var(--hover);
+}
+
+/* 键盘上下键走到哪一行，高亮就跟着；鼠标移上去也走同一套底色 */
+.suggest-item.active {
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.suggest-icon {
+    flex: 0 0 auto;
+    width: 18px;
+    font-size: 13px;
+    text-align: center;
+    opacity: 0.6;
+}
+
+.suggest-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 右侧小标签：这一行点下去是"打开书签"还是"拿去搜索" */
+.suggest-kind {
+    flex: 0 0 auto;
+    font-size: 11px;
+    opacity: 0.45;
+}
+
+/* 「本地搜索结果不存在」那一行：只是说明，不可点 */
+.suggest-note {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px 10px;
+    font-size: 12.5px;
+    color: var(--text);
+    opacity: 0.55;
+}
+
 .search-go {
     display: grid;
     place-items: center;

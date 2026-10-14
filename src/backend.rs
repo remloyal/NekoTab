@@ -1079,6 +1079,64 @@ pub async fn get_quote() -> Result<Quote, ServerFnError> {
     })
 }
 
+/// 搜索联想。由服务端代取引擎的联想接口（浏览器直连会被 CORS 挡）。
+///
+/// 入参是**库里引擎的 id**，不是地址——服务端拿 id 反查 URL，再对照
+/// `suggest::endpoint_for` 认得的端点表。这样客户端无法让我们去请求任意地址
+/// （SSRF），和 `/icon/{host}` 只服务已收藏站点是同一个取舍。
+///
+/// 联想失败一律返回空表、不报错：它只是锦上添花，网络不通（纯内网部署）时
+/// 不该在界面上留下任何痕迹。本地书签匹配不受影响。
+#[server]
+pub async fn suggest(engine_id: i64, query: String) -> Result<Vec<String>, ServerFnError> {
+    use crate::db;
+    use crate::suggest;
+
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let engine_url: Option<String> = sqlx::query_scalar("SELECT url FROM engines WHERE id = ?")
+        .bind(engine_id)
+        .fetch_optional(db::pool())
+        .await
+        .map_err(|e| ServerFnError::new(format!("读取搜索引擎失败: {e}")))?;
+
+    let Some(engine_url) = engine_url else {
+        return Ok(Vec::new());
+    };
+    let Some(endpoint) = suggest::endpoint_for(&engine_url) else {
+        return Ok(Vec::new());
+    };
+
+    let url = endpoint
+        .url
+        .replace("%s", &suggest::encode_query(query));
+
+    // 单独给更短的超时：联想要跟着输入走，8 秒的通用超时等不起，
+    // 慢一点就该当作"这家没有联想"，而不是让列表悬在那里。
+    let response = http_client()
+        .get(&url)
+        .timeout(std::time::Duration::from_millis(2500))
+        .send()
+        .await;
+
+    let Ok(response) = response else {
+        return Ok(Vec::new());
+    };
+    if !response.status().is_success() {
+        return Ok(Vec::new());
+    }
+    let Ok(body) = response.text().await else {
+        return Ok(Vec::new());
+    };
+
+    let mut items = suggest::parse(endpoint.kind, &body);
+    items.truncate(8);
+    Ok(items)
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;

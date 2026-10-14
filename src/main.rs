@@ -15,6 +15,9 @@ mod lunar;
 mod models;
 mod pages;
 mod routes;
+// 搜索联想：认引擎端点 + 解析响应，服务端才用得上（客户端只调 server function）
+#[cfg(feature = "server")]
+mod suggest;
 // 壁纸只在服务端读写文件，客户端只通过 /wallpaper 这组路由访问
 #[cfg(feature = "server")]
 mod wallpaper;

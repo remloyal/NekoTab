@@ -209,6 +209,20 @@ pub fn Home() -> Element {
         .cloned()
         .collect();
 
+    // 搜索联想里的"本地命中"那几条。只有「搜网页」模式才需要——筛书签模式下
+    // 下方网格本身就在实时筛，再给个面板是重复。
+    let local_suggest: Vec<Bookmark> = if search_mode() == SearchMode::Web && !query().trim().is_empty()
+    {
+        all_items
+            .iter()
+            .filter(|item| matches_keyword(item, &query()))
+            .take(4)
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     // 标签页的条数跟着当前结果集走（和原来的行为一致）
     let counts = count_by_group(&keyword_matched, &known_group_ids);
     let tabs = build_tabs(&groups, &counts);
@@ -555,6 +569,7 @@ pub fn Home() -> Element {
                     });
                 },
                 on_open_settings: move |_| modal.set(ModalState::EngineSettings),
+                local_matches: local_suggest.clone(),
             }
 
             if settings.hide_grid {
