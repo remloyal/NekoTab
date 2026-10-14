@@ -41,6 +41,16 @@ pub fn BookmarkGrid(
 
     let is_draggable = editing && !selecting;
 
+    // hydration 后补查一次图标加载状态：SSR 那批 HTML 里的 <img> 可能在 onerror
+    // 挂上之前就已经失败了（同源 404 往往比 wasm 下载还快），不补这一刀就会一直
+    // 顶着浏览器的"碎图"占位符。之后新增的图片都是客户端渲染、监听创建时已就位，
+    // 各自的 onerror 管得住，所以这里跑一次就够。
+    use_effect(move || {
+        spawn(async move {
+            crate::dom::mark_broken_favicons().await;
+        });
+    });
+
     let mut class = String::from("grid");
     if is_draggable {
         class.push_str(" editing");

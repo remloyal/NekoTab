@@ -797,6 +797,14 @@ body {
     border-radius: calc(var(--tile-size) * 0.104);
 }
 
+/* 取不到站点图标：整块撤掉，把下面的首字色块让出来。
+   这个标记有两条来路——onerror（hydration 之后才失败的），以及 hydration 后
+   补查一次 naturalWidth（在 onerror 挂上之前就失败的，见
+   dom::mark_broken_favicons）。缺了后者，那些卡片会一直顶着浏览器的"碎图"占位符。 */
+.tile-favicon[data-broken] {
+    display: none;
+}
+
 /* 自定义内置图标：铺满图标块，颜色跟随 .tile-icon 的白色 */
 .tile-custom {
     display: grid;

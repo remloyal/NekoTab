@@ -245,7 +245,9 @@ pub fn IconTile(
                 if let Some(icon) = custom {
                     {icon}
                 } else if let Some(host) = icon_host.clone() {
-                    // 取到站点图标就盖在首字色块之上；404 时 onerror 隐藏它，露出首字
+                    // 取到站点图标就盖在首字色块之上；404 时藏掉它，露出首字。
+                    // 但在 onerror 挂上之前就失败的（SSR 那批），这里收不到通知，
+                    // 由 BookmarkGrid 挂载后补查一次补齐，见 dom::mark_broken_favicons。
                     if !icon_failed() {
                         img {
                             class: "tile-favicon",
