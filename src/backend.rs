@@ -1085,8 +1085,8 @@ pub async fn get_quote() -> Result<Quote, ServerFnError> {
 /// `suggest::endpoint_for` 认得的端点表。这样客户端无法让我们去请求任意地址
 /// （SSRF），和 `/icon/{host}` 只服务已收藏站点是同一个取舍。
 ///
-/// 联想失败一律返回空表、不报错：它只是锦上添花，网络不通（纯内网部署）时
-/// 不该在界面上留下任何痕迹。本地书签匹配不受影响。
+/// 联想失败一律返回空表、不报错：它只是锦上添花，出口抖一下、对方限流一次，
+/// 都不该在界面上留下痕迹。搜索本身不受影响。
 #[server]
 pub async fn suggest(engine_id: i64, query: String) -> Result<Vec<String>, ServerFnError> {
     use crate::db;
