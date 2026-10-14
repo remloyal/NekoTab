@@ -50,8 +50,10 @@ WORKDIR /app
 COPY --from=builder /app/target/dx/nekotab/release/web/ /app/
 
 # ICON_DIR 与数据一起放挂载卷：图标是落盘缓存的字节，容器重建后不必重新代取。
+# WALLPAPER_DIR 更得放卷里——那是用户上传的数据，丢了没法重新生成。
 ENV DATABASE_URL="sqlite:///data/mtab.db?mode=rwc" \
     ICON_DIR="/data/icon" \
+    WALLPAPER_DIR="/data/wallpaper" \
     IP=0.0.0.0 \
     PORT=8080
 

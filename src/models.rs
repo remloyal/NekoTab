@@ -14,6 +14,9 @@ pub struct Bookmark {
     pub tags: String,
     /// 归属分组；`None` 即"未分组"（不占一行，由前端合成）
     pub group_id: Option<i64>,
+    /// 自定义图标。空串表示自动（按 host 代取），其余取值与分组图标同一套约定，
+    /// 见 [`crate::components::icons`]：`i:xxx` 内置图标 / `http…` 图片地址 / `/…` 本站路径。
+    pub icon: String,
     /// UTC 时间字符串，形如 `2026-10-12 08:30:00`
     pub created_at: String,
 }
@@ -28,6 +31,9 @@ pub struct NewBookmark {
     /// 留空表示"未分组"
     #[serde(default)]
     pub group_id: Option<i64>,
+    /// 留空表示自动取站点图标
+    #[serde(default)]
+    pub icon: String,
 }
 
 /// 一个分组（分类标签页）。
@@ -307,6 +313,16 @@ pub struct ImportedBookmark {
     /// 分组名（导出时写成名字而非 id，跨库导入才能对上）
     #[serde(default)]
     pub group: String,
+    /// 自定义图标（与 `Bookmark::icon` 同一套约定）
+    #[serde(default)]
+    pub icon: String,
+    /// 浏览器导出文件里内联的图标（`ICON="data:…"`）。
+    ///
+    /// 只在导入方向有意义：Firefox 一类浏览器会把已缓存的站点图标直接内联进
+    /// HTML，那是内网站点唯一能拿到图标的来源。导入时会被写进图标缓存，
+    /// 因此**不进 JSON 备份**（备份里带的是 `icon` 字段）。
+    #[serde(default, skip_serializing)]
+    pub inline_icon: Option<String>,
 }
 
 #[cfg(feature = "server")]
@@ -318,6 +334,8 @@ impl ImportedBookmark {
             description: bookmark.description.clone(),
             tags: bookmark.tags.clone(),
             group: group_name.to_string(),
+            icon: bookmark.icon.clone(),
+            inline_icon: None,
         }
     }
 }

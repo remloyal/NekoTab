@@ -27,6 +27,8 @@ pub fn Pager(
                 class: "pager-btn",
                 r#type: "button",
                 title: "上一页",
+                // 拖拽卡片到这个按钮上会翻页（跨页拖拽），见 BookmarkGrid
+                "data-page-flip": "prev",
                 onclick: move |_| on_jump.call(page.saturating_sub(1)),
                 "‹"
             }
@@ -47,6 +49,7 @@ pub fn Pager(
                 class: "pager-btn",
                 r#type: "button",
                 title: "下一页",
+                "data-page-flip": "next",
                 onclick: move |_| on_jump.call((page + 1).min(page_count - 1)),
                 "›"
             }

@@ -9,6 +9,7 @@ mod engine_logo;
 mod engine_settings;
 mod group_settings;
 mod group_tabs;
+mod icon_picker;
 mod icon_tile;
 pub mod icons;
 mod modal;
@@ -16,7 +17,9 @@ mod pager;
 mod quote;
 mod search_bar;
 mod settings_panel;
+mod tag_picker;
 mod trash_panel;
+mod wallpaper_panel;
 
 pub use batch::{BatchMoveList, BatchTagForm};
 pub use bookmark_form::BookmarkForm;

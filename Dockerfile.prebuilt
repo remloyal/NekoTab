@@ -33,8 +33,10 @@ COPY . /app/
 # 变量名是 IP 不是 HOST（由 dioxus-cli-config 读取）。
 # ICON_DIR 指到挂载卷里：站点图标是落盘缓存的字节（库里只留元数据），
 # 不放卷里的话容器一重建就得把图标全部重新代取一遍。
+# WALLPAPER_DIR 更得放卷里——上传的壁纸是用户数据，丢了没法重新生成。
 ENV DATABASE_URL="sqlite:///data/mtab.db?mode=rwc" \
     ICON_DIR="/data/icon" \
+    WALLPAPER_DIR="/data/wallpaper" \
     IP=0.0.0.0 \
     PORT=8080
 

@@ -332,6 +332,56 @@ mod server {
             .await;
     }
 
+    /// 把一个已知的图标写进缓存（字节落盘 + 元数据入库）。
+    ///
+    /// 用途：浏览器导出的书签 HTML 里内联了 `ICON="data:…"`，那是**已缓存的站点
+    /// 图标**，也常常是内网站点唯一能拿到图标的来源（服务端代取那些地址取不到）。
+    /// 导入时交给这里，之后卡片走原来的 `/icon/{host}` 就能拿到，不必再出网。
+    ///
+    /// 会覆盖该 host 已有的记录——包括"取不到"的负缓存，那正是要纠正的。
+    pub async fn store_icon(host: &str, content_type: &str, data: &[u8]) -> bool {
+        if !is_valid_host(host) || !content_type.starts_with("image/") {
+            return false;
+        }
+        if data.is_empty() || data.len() > MAX_ICON_BYTES {
+            return false;
+        }
+
+        let file_name = icon_file_name(host, content_type);
+        if write_icon(&file_name, data).await.is_err() {
+            return false;
+        }
+
+        let pool = db::pool();
+
+        // 换了扩展名时清掉旧文件，别让同一站点留两份
+        let previous: Option<String> =
+            sqlx::query_scalar("SELECT file_name FROM favicons WHERE host = ?")
+                .bind(host)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten();
+        if let Some(previous) = previous.filter(|old| !old.is_empty() && *old != file_name) {
+            remove_icon(&previous).await;
+        }
+
+        sqlx::query(
+            "INSERT INTO favicons (host, content_type, file_name, fetched_at) \
+             VALUES (?, ?, ?, datetime('now')) \
+             ON CONFLICT(host) DO UPDATE SET \
+                content_type = excluded.content_type, \
+                file_name = excluded.file_name, \
+                fetched_at = excluded.fetched_at",
+        )
+        .bind(host)
+        .bind(content_type)
+        .bind(&file_name)
+        .execute(pool)
+        .await
+        .is_ok()
+    }
+
     /// 清空全部图标缓存：库表记录 + 磁盘文件。返回清掉的条目数。
     ///
     /// 负缓存（取不到时记的"空"记录）在有效期里不会重试，所以修好网络之后
@@ -549,7 +599,7 @@ mod server {
     }
 
     /// 图标声明解析后的形态。
-    pub(super) enum IconRef {
+    pub(crate) enum IconRef {
         /// 一个可下载的绝对地址
         Url(String),
         /// 内联在页面里的 `data:` URI，直接带着类型与字节
@@ -560,7 +610,7 @@ mod server {
     ///
     /// 内联图标很常见（现代站点与 SPA 模板常把 favicon 直接写进 head），
     /// 以前这里对 `data:` 一律返回 None，等于白丢了一类图标。
-    pub(super) fn resolve_icon_ref(scheme: &str, host: &str, href: &str) -> Option<IconRef> {
+    pub(crate) fn resolve_icon_ref(scheme: &str, host: &str, href: &str) -> Option<IconRef> {
         let href = href.trim();
         if let Some(rest) = href.strip_prefix("data:") {
             let (content_type, data) = decode_data_uri(rest)?;
@@ -573,7 +623,7 @@ mod server {
     ///
     /// mediatype 取第一个 `;` 之前的部分；`base64` 只有作为 `;` 之后的分量才算标志
     /// （按 RFC 2397，`data:base64,…` 里的 `base64` 是 mediatype 而不是标志）。
-    pub(super) fn decode_data_uri(rest: &str) -> Option<(String, Vec<u8>)> {
+    pub fn decode_data_uri(rest: &str) -> Option<(String, Vec<u8>)> {
         let (meta, payload) = rest.split_once(',')?;
 
         let mut segments = meta.split(';');
@@ -596,7 +646,7 @@ mod server {
     }
 
     /// 标准 base64 解码；忽略空白与 `=` 填充。非法字符直接判失败。
-    pub(super) fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    pub(crate) fn decode_base64(input: &str) -> Option<Vec<u8>> {
         fn value(byte: u8) -> Option<u32> {
             match byte {
                 b'A'..=b'Z' => Some((byte - b'A') as u32),
@@ -629,7 +679,7 @@ mod server {
     }
 
     /// 百分号解码。非 base64 的 `data:` URI 用它，内联 SVG 常见于这种写法。
-    pub(super) fn percent_decode(input: &str) -> Vec<u8> {
+    pub(crate) fn percent_decode(input: &str) -> Vec<u8> {
         let bytes = input.as_bytes();
         let mut out = Vec::with_capacity(bytes.len());
         let mut i = 0;
@@ -705,7 +755,7 @@ mod server {
 }
 
 #[cfg(feature = "server")]
-pub use server::{clear_cache, icon_handler, init_icon_dir};
+pub use server::{clear_cache, decode_data_uri, icon_handler, init_icon_dir, store_icon};
 
 #[cfg(test)]
 mod tests {

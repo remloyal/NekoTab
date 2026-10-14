@@ -79,6 +79,22 @@ pub fn bookmark_id_at(_x: f64, _y: f64) -> Option<i64> {
     None
 }
 
+/// 按视口坐标找最近一个带指定 `data-*` 属性的祖先元素，返回该属性的值。
+///
+/// 拖拽时用它识别"指针是否落在翻页按钮上"，从而支持跨页拖拽。
+#[cfg(feature = "web")]
+pub fn data_attr_at(x: f64, y: f64, attr: &str) -> Option<String> {
+    let element = document()?.element_from_point(x as f32, y as f32)?;
+    let selector = format!("[{attr}]");
+    let node = element.closest(&selector).ok().flatten()?;
+    node.get_attribute(attr)
+}
+
+#[cfg(not(feature = "web"))]
+pub fn data_attr_at(_x: f64, _y: f64, _attr: &str) -> Option<String> {
+    None
+}
+
 /// 焦点是否正停在"正在编辑的文本"上——翻页快捷键要不要让路就看它。
 ///
 /// 判断比"焦点是不是输入框"细一层：搜索框默认自动聚焦，如果只看标签名，

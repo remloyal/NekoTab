@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::components::icons;
 use crate::models::Bookmark;
 
 /// 由字符串生成稳定的色相（FNV-1a 取模 360），供图标底色使用。
@@ -17,6 +18,19 @@ pub(crate) fn icon_initial(name: &str) -> String {
         .next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "?".to_string())
+}
+
+/// 书签自定义图标的渲染。空串返回 `None`（表示走站点自动代取那条路）。
+fn custom_icon(icon: &str) -> Option<Element> {
+    if let Some(id) = icons::builtin_id(icon) {
+        return icons::builtin_svg(id).map(|svg| rsx! { div { class: "tile-custom", {svg} } });
+    }
+    if icon.starts_with("http://") || icon.starts_with("https://") || icon.starts_with('/') {
+        return Some(rsx! {
+            img { class: "tile-favicon", src: "{icon}", alt: "", loading: "lazy" }
+        });
+    }
+    None
 }
 
 fn icon_of(bookmark: &Bookmark) -> (String, u32) {
@@ -82,6 +96,8 @@ pub fn IconTile(
     let mut icon_failed = use_signal(|| false);
     // 站点图标由本服务的 /icon/{host} 代取；host 解析不出来就不请求
     let icon_host = crate::favicon::host_of(&bookmark.url);
+    // 自定义图标优先：内置图标画 svg，地址直接当图片用；空串表示按站点自动代取
+    let custom = custom_icon(&bookmark.icon);
 
     // 长按检测：按下时的坐标 + 递增令牌（令牌变了就说明这次按下已作废）
     let mut press_origin = use_signal(|| Option::<(f64, f64)>::None);
@@ -226,8 +242,10 @@ pub fn IconTile(
                 class: "tile-icon",
                 style: "background: linear-gradient(140deg, hsl({hue} 62% 54%), hsl({(hue + 30) % 360} 60% 42%));",
                 span { class: "tile-letter", "{initial}" }
-                // 取到站点图标就盖在首字色块之上；404 时 onerror 隐藏它，露出首字
-                if let Some(host) = icon_host.clone() {
+                if let Some(icon) = custom {
+                    {icon}
+                } else if let Some(host) = icon_host.clone() {
+                    // 取到站点图标就盖在首字色块之上；404 时 onerror 隐藏它，露出首字
                     if !icon_failed() {
                         img {
                             class: "tile-favicon",

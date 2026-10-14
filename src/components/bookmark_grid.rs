@@ -27,6 +27,8 @@ pub fn BookmarkGrid(
     on_delete: EventHandler<Bookmark>,
     on_toggle_select: EventHandler<i64>,
     on_reorder: EventHandler<(i64, i64)>,
+    /// 拖拽时把指针停在翻页按钮上：+1 下一页，-1 上一页（跨页拖拽）
+    on_page_flip: EventHandler<isize>,
 ) -> Element {
     // 已按下但还没超过拖拽阈值：(卡片 id, 起点 x, 起点 y)
     let mut armed = use_signal(|| Option::<(i64, f64, f64)>::None);
@@ -90,6 +92,12 @@ pub fn BookmarkGrid(
                     dragging.set(Some(id));
                     over.set(Some(id));
                     just_dragged.set(true);
+                }
+
+                // 指针停在翻页按钮上时翻页，翻完继续拖（落点在下一页上）
+                if let Some(direction) = crate::dom::data_attr_at(coords.x, coords.y, "data-page-flip") {
+                    on_page_flip.call(if direction == "prev" { -1 } else { 1 });
+                    return;
                 }
 
                 // 落点用坐标做命中测试：比逐个读卡片矩形便宜，也不受滚动影响

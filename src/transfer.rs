@@ -46,6 +46,88 @@ pub fn to_json(items: &[ImportedBookmark]) -> String {
         .unwrap_or_else(|_| "{\"bookmarks\":[]}".to_string())
 }
 
+/// 一条待导出的书签。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportRow {
+    pub title: String,
+    pub url: String,
+    pub description: String,
+    /// 分组名；空串表示未分组
+    pub group: String,
+}
+
+/// 导出为 Netscape 书签 HTML —— 也就是浏览器能直接导入的那种格式。
+///
+/// 与导入端对称：分组写成文件夹（`<H3>` + 嵌套 `<DL>`），未分组的放在根层。
+/// 有了它数据就不只进不出——想搬回浏览器、或换个导航页，拿这个文件就行。
+pub fn to_netscape(rows: &[ExportRow]) -> String {
+    // 分组按首次出现的顺序输出，和界面上的标签栏顺序一致
+    let mut order: Vec<&str> = Vec::new();
+    for row in rows {
+        let group = row.group.as_str();
+        if !group.is_empty() && !order.contains(&group) {
+            order.push(group);
+        }
+    }
+
+    let mut out = String::from(concat!(
+        "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n",
+        "<META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n",
+        "<TITLE>NekoTab 书签</TITLE>\n",
+        "<H1>NekoTab 书签</H1>\n",
+        "<DL><p>\n",
+    ));
+
+    for group in &order {
+        out.push_str(&format!(
+            "    <DT><H3>{}</H3>\n    <DL><p>\n",
+            encode_entities(group)
+        ));
+        for row in rows.iter().filter(|row| row.group == *group) {
+            out.push_str(&bookmark_line(row, "        "));
+        }
+        out.push_str("    </DL><p>\n");
+    }
+
+    for row in rows.iter().filter(|row| row.group.is_empty()) {
+        out.push_str(&bookmark_line(row, "    "));
+    }
+
+    out.push_str("</DL><p>\n");
+    out
+}
+
+/// 一条书签的 HTML（`<DT><A HREF>` + 可选的 `<DD>` 描述）。
+fn bookmark_line(row: &ExportRow, indent: &str) -> String {
+    let mut line = format!(
+        "{indent}<DT><A HREF=\"{}\">{}</A>\n",
+        encode_entities(&row.url),
+        encode_entities(&row.title)
+    );
+    if !row.description.trim().is_empty() {
+        line.push_str(&format!(
+            "{indent}<DD>{}\n",
+            encode_entities(row.description.trim())
+        ));
+    }
+    line
+}
+
+/// HTML 实体编码。只处理会破坏结构的那几个字符。
+fn encode_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// 浏览器导出时把所有书签包在一个容器文件夹里，它只表示"放在哪个容器"，
 /// 不表达用户的分类意图。导入时跳过它，否则整个标签栏只剩一个「书签栏」。
 const CONTAINER_FOLDERS: [&str; 16] = [
@@ -134,24 +216,37 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
                 rest = &rest[start + len..];
             }
         } else if name.eq_ignore_ascii_case("a") {
-            let href = attr_value(tag, "href").unwrap_or_default();
+            // href 也要解码实体：浏览器导出时属性值是 HTML 转义过的，
+            // URL 里的 & 会写成 &amp;，不解码就会把 &amp; 原样存进库。
+            let href = decode_entities(&attr_value(tag, "href").unwrap_or_default());
+
+            // Firefox 一类浏览器会把**已缓存的站点图标**内联在 ICON 属性里
+            // （`ICON="data:image/png;base64,…"`）。这往往是内网站点唯一能拿到
+            // 图标的来源——服务端代取那些地址是取不到的。这里只原样取出来，
+            // 解码与落盘交给导入环节（它才拿得到数据库与图标目录）。
+            let inline_icon = attr_value(tag, "icon")
+                .map(|value| decode_entities(&value))
+                .map(|value| value.trim().to_string())
+                .filter(|value| value.starts_with("data:image/"));
 
             if let Some((start, len)) = find_close_tag(rest, "a") {
                 let title = decode_entities(&rest[..start]).trim().to_string();
                 rest = &rest[start + len..];
 
-                        // 解析器只负责忠实提取；URL 是否可用由导入环节判定，
-                        // 这样"跳过 N 条"的口径才和源文件对得上。
-                        if !href.trim().is_empty() {
-                            out.push(ImportedBookmark {
-                                title: if title.is_empty() { href.clone() } else { title },
-                                url: href,
-                                description: String::new(),
-                                // 完整路径进标签（检索用），首层分类进分组（归属用）
-                                tags: folders.join(","),
-                                group: group_from_folders(&folders),
-                            });
-                        }
+                // 解析器只负责忠实提取；URL 是否可用由导入环节判定，
+                // 这样"跳过 N 条"的口径才和源文件对得上。
+                if !href.trim().is_empty() {
+                    out.push(ImportedBookmark {
+                        title: if title.is_empty() { href.clone() } else { title },
+                        url: href,
+                        description: String::new(),
+                        // 完整路径进标签（检索用），首层分类进分组（归属用）
+                        tags: folders.join(","),
+                        group: group_from_folders(&folders),
+                        icon: String::new(),
+                        inline_icon,
+                    });
+                }
             }
         } else if name.eq_ignore_ascii_case("dd") {
             collecting_desc = true;
@@ -343,6 +438,16 @@ mod tests {
         assert_eq!(mdn.title, "MDN & Docs");
     }
 
+    /// URL 里的 `&` 在浏览器导出文件里是 `&amp;`，必须解码回来。
+    #[test]
+    fn decodes_entities_in_href() {
+        let items = parse_netscape(
+            r#"<DL><p><DT><A HREF="https://a.com/s?q=1&amp;lang=zh">带查询串</A></DL><p>"#,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].url, "https://a.com/s?q=1&lang=zh");
+    }
+
     #[test]
     fn parser_keeps_non_web_urls_for_the_importer_to_judge() {
         // 解析器忠实提取，javascript: 也保留；是否可用由导入环节判定，
@@ -365,6 +470,42 @@ mod tests {
         assert_eq!(rust.tags, "");
     }
 
+    /// 导出的 HTML 必须能被自己的解析器读回来（也就是浏览器也能导入）。
+    #[test]
+    fn netscape_export_round_trips() {
+        let rows = vec![
+            ExportRow {
+                title: "GitHub & Co".to_string(),
+                url: "https://github.com".to_string(),
+                description: "代码托管".to_string(),
+                group: "开发".to_string(),
+            },
+            ExportRow {
+                title: "散装".to_string(),
+                url: "https://a.com/b?c=1&d=2".to_string(),
+                description: String::new(),
+                group: String::new(),
+            },
+        ];
+
+        let html = to_netscape(&rows);
+        // 头部不该带前导空白（续行写法容易把缩进带进去）
+        assert!(html.starts_with("<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<META"));
+
+        let back = parse_netscape(&html);
+        assert_eq!(back.len(), rows.len());
+
+        let github = back.iter().find(|i| i.url == "https://github.com").unwrap();
+        assert_eq!(github.title, "GitHub & Co", "实体编码/解码要对称");
+        assert_eq!(github.group, "开发", "分组要还原成文件夹");
+        assert_eq!(github.description, "代码托管");
+
+        let loose = back.iter().find(|i| i.url.starts_with("https://a.com")).unwrap();
+        assert_eq!(loose.url, "https://a.com/b?c=1&d=2", "URL 里的 & 要还原");
+        assert_eq!(loose.group, "", "未分组的仍在根层");
+    }
+
     #[test]
     fn json_round_trip() {
         let items = parse_netscape(SAMPLE);
@@ -381,6 +522,8 @@ mod tests {
             description: "代码托管".to_string(),
             tags: "dev".to_string(),
             group: "开发".to_string(),
+            icon: "i:code".to_string(),
+            inline_icon: None,
         }];
 
         let back = parse_json(&to_json(&items)).expect("解析自身备份");

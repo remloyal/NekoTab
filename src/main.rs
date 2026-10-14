@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+#[cfg(feature = "server")]
+use dioxus::server::axum::response::IntoResponse;
 
 mod backend;
 mod components;
@@ -13,6 +15,9 @@ mod lunar;
 mod models;
 mod pages;
 mod routes;
+// 壁纸只在服务端读写文件，客户端只通过 /wallpaper 这组路由访问
+#[cfg(feature = "server")]
+mod wallpaper;
 // 导入解析 / 导出序列化只在服务端进行，客户端只负责传文本与展示回执
 #[cfg(feature = "server")]
 mod transfer;
@@ -61,6 +66,48 @@ async fn export_bookmarks() -> impl dioxus::server::axum::response::IntoResponse
     )
 }
 
+/// 导出全部书签为浏览器可导入的 Netscape HTML。
+#[cfg(feature = "server")]
+async fn export_bookmarks_html() -> impl dioxus::server::axum::response::IntoResponse {
+    use dioxus::server::axum::http::header;
+
+    let body = backend::export_bookmarks_html().await;
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"nekotab-bookmarks.html\"",
+            ),
+        ],
+        body,
+    )
+}
+
+/// 下载数据库的一致快照（`VACUUM INTO`）。
+///
+/// 比"自己拷 data/mtab.db"可靠：库开着 WAL，直接拷文件会丢掉还在 -wal 里的写入。
+#[cfg(feature = "server")]
+async fn export_database() -> impl dioxus::server::axum::response::IntoResponse {
+    use dioxus::server::axum::http::{header, StatusCode};
+
+    match backend::export_database_snapshot().await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/vnd.sqlite3"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"nekotab.db\"",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
 fn main() {
     // 服务端：先初始化数据库连接池，再把 axum router 交给 dioxus 启动。
     #[cfg(feature = "server")]
@@ -81,6 +128,11 @@ fn main() {
                 Err(e) => eprintln!("[NekoTab] 图标目录创建失败，图标将不落盘: {e}"),
             }
 
+            match wallpaper::init_wallpaper_dir() {
+                Ok(dir) => println!("[NekoTab] 壁纸目录: {}", dir.display()),
+                Err(e) => eprintln!("[NekoTab] 壁纸目录创建失败，上传将不可用: {e}"),
+            }
+
             // 手工注册的路由优先于 SSR 兜底
             let router = dioxus::server::router(App)
                 .route(
@@ -90,6 +142,25 @@ fn main() {
                 .route(
                     "/icon/{host}",
                     dioxus::server::axum::routing::get(favicon::icon_handler),
+                )
+                .route(
+                    "/export/bookmarks.html",
+                    dioxus::server::axum::routing::get(export_bookmarks_html),
+                )
+                .route(
+                    "/export/db.sqlite",
+                    dioxus::server::axum::routing::get(export_database),
+                )
+                // 上传的壁纸：列表 / 上传 / 取用 / 删除
+                .route(
+                    "/wallpaper",
+                    dioxus::server::axum::routing::get(wallpaper::list_handler)
+                        .post(wallpaper::upload_handler),
+                )
+                .route(
+                    "/wallpaper/{name}",
+                    dioxus::server::axum::routing::get(wallpaper::serve_handler)
+                        .delete(wallpaper::delete_handler),
                 )
                 // 响应压缩，gzip 与 brotli 都开。
                 //

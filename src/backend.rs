@@ -57,7 +57,7 @@ fn build_search_sql(keyword_count: usize) -> String {
                            OR tags LIKE ? ESCAPE '\\')";
 
     let mut sql = String::from(
-        "SELECT id, title, url, description, tags, group_id, created_at FROM bookmarks \
+        "SELECT id, title, url, description, tags, group_id, icon, created_at FROM bookmarks \
          WHERE deleted_at IS NULL",
     );
 
@@ -71,12 +71,12 @@ fn build_search_sql(keyword_count: usize) -> String {
     sql
 }
 
-/// 校验并规范化书签入参，返回 `(title, url, description, tags, group_id)`。
+/// 校验并规范化书签入参，返回 `(title, url, description, tags, group_id, icon)`。
 /// 新增与修改共用，避免两处校验漂移。
 #[cfg(feature = "server")]
 async fn clean_bookmark(
     input: &NewBookmark,
-) -> Result<(String, String, String, String, Option<i64>), String> {
+) -> Result<(String, String, String, String, Option<i64>, String), String> {
     let title = input.title.trim().to_string();
     let url = input.url.trim().to_string();
     let description = input.description.trim().to_string();
@@ -102,7 +102,25 @@ async fn clean_bookmark(
         None => None,
     };
 
-    Ok((title, url, description, normalize_tags(&input.tags), group_id))
+    // 图标：空串=自动代取，其余与分组图标同一套约定
+    let icon = input.icon.trim().to_string();
+    let icon_ok = icon.is_empty()
+        || icon.starts_with("i:")
+        || icon.starts_with("http://")
+        || icon.starts_with("https://")
+        || icon.starts_with('/');
+    if !icon_ok {
+        return Err("图标需为内置图标、http(s) 地址或以 / 开头的本站路径".to_string());
+    }
+
+    Ok((
+        title,
+        url,
+        description,
+        normalize_tags(&input.tags),
+        group_id,
+        icon,
+    ))
 }
 
 /// 规范化标签：按逗号拆分、去空白、丢空项、去重、重新用逗号连接。
@@ -182,12 +200,12 @@ pub async fn list_bookmarks(query: String) -> Result<Vec<Bookmark>, ServerFnErro
 pub async fn add_bookmark(input: NewBookmark) -> Result<i64, ServerFnError> {
     use crate::db;
 
-    let (title, url, description, tags, group_id) =
+    let (title, url, description, tags, group_id, icon) =
         clean_bookmark(&input).await.map_err(ServerFnError::new)?;
 
     sqlx::query_scalar::<_, i64>(
-        "INSERT INTO bookmarks (title, url, description, tags, group_id, sort_order) \
-         VALUES (?, ?, ?, ?, ?, COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
+        "INSERT INTO bookmarks (title, url, description, tags, group_id, icon, sort_order) \
+         VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
     .bind(title)
@@ -195,28 +213,30 @@ pub async fn add_bookmark(input: NewBookmark) -> Result<i64, ServerFnError> {
     .bind(description)
     .bind(tags)
     .bind(group_id)
+    .bind(icon)
     .fetch_one(db::pool())
     .await
     .map_err(|e| ServerFnError::new(format!("保存书签失败: {e}")))
 }
 
-/// 修改已有书签（标题 / URL / 描述 / 标签 / 分组），不改排序位。
+/// 修改已有书签（标题 / URL / 描述 / 标签 / 分组 / 图标），不改排序位。
 #[server]
 pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFnError> {
     use crate::db;
 
-    let (title, url, description, tags, group_id) =
+    let (title, url, description, tags, group_id, icon) =
         clean_bookmark(&input).await.map_err(ServerFnError::new)?;
 
     let affected = sqlx::query(
-        "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ? \
-         WHERE id = ?",
+        "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
+         icon = ? WHERE id = ?",
     )
     .bind(title)
     .bind(url)
     .bind(description)
     .bind(tags)
     .bind(group_id)
+    .bind(icon)
     .bind(id)
     .execute(db::pool())
     .await
@@ -890,6 +910,9 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
             .await
             .map_err(|e| ServerFnError::new(format!("计算分组排序位失败: {e}")))?;
 
+    // 缩略图：等事务提交后再落盘（见循环里的说明）
+    let mut inline_icons: Vec<(String, String, Vec<u8>)> = Vec::new();
+
     let mut report = ImportReport::default();
 
     for item in parsed {
@@ -924,15 +947,30 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
 
         next_sort += 1;
 
+        // 浏览器导出的 HTML 里内联了站点图标（`ICON="data:…"`）时先收集起来，
+        // **等事务提交后**再写图标缓存：写缓存会另取一条池连接去写 favicons 表，
+        // 在外层写事务还开着的时候写，SQLite 直接报 `database is locked`。
+        // 收在这里还有个好处：导入整体回滚时不会留下图标。
+        if let Some(inline) = item.inline_icon.as_deref() {
+            if let Some((content_type, data)) =
+                crate::favicon::decode_data_uri(inline.trim_start_matches("data:"))
+            {
+                if let Some(host) = crate::favicon::host_of(&url) {
+                    inline_icons.push((host, content_type, data));
+                }
+            }
+        }
+
         sqlx::query(
-            "INSERT INTO bookmarks (title, url, description, tags, group_id, sort_order) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO bookmarks (title, url, description, tags, group_id, icon, sort_order) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(if title.is_empty() { url.clone() } else { title })
         .bind(&url)
         .bind(item.description.trim())
         .bind(normalize_tags(&item.tags))
         .bind(group_id)
+        .bind(item.icon.trim())
         .bind(next_sort)
         .execute(&mut *tx)
         .await
@@ -945,6 +983,11 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
     tx.commit()
         .await
         .map_err(|e| ServerFnError::new(format!("提交导入失败: {e}")))?;
+
+    // 事务已结束，这时写图标缓存不会再和它抢写锁
+    for (host, content_type, data) in inline_icons {
+        crate::favicon::store_icon(&host, &content_type, &data).await;
+    }
 
     Ok(report)
 }
@@ -995,6 +1038,79 @@ pub async fn export_bookmarks_json() -> String {
 #[server]
 pub async fn clear_icon_cache() -> Result<usize, ServerFnError> {
     Ok(crate::favicon::clear_cache().await)
+}
+
+/// 把全部书签导出为 Netscape 书签 HTML（浏览器可直接导入）。
+///
+/// 不是 server function——由 `/export/bookmarks.html` 路由直接调用，理由同 JSON 导出。
+#[cfg(feature = "server")]
+pub async fn export_bookmarks_html() -> String {
+    use crate::db;
+    use crate::transfer::ExportRow;
+
+    let sql = build_search_sql(0);
+
+    let rows = sqlx::query_as::<_, Bookmark>(sqlx::AssertSqlSafe(sql))
+        .fetch_all(db::pool())
+        .await
+        .unwrap_or_default();
+
+    let group_names: std::collections::HashMap<i64, String> =
+        sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM groups")
+            .fetch_all(db::pool())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+    let items: Vec<ExportRow> = rows
+        .iter()
+        .map(|bookmark| ExportRow {
+            title: bookmark.title.clone(),
+            url: bookmark.url.clone(),
+            description: bookmark.description.clone(),
+            group: bookmark
+                .group_id
+                .and_then(|id| group_names.get(&id).cloned())
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    crate::transfer::to_netscape(&items)
+}
+
+/// 打一份数据库的一致快照并返回字节。
+///
+/// 用 `VACUUM INTO` 而不是直接拷贝文件：库开着 WAL，最近的写入还在 `-wal` 里，
+/// 拷 `mtab.db` 会丢掉那部分（README 里"数据落在 /data/mtab.db"那种说法容易
+/// 让人以为直接拷文件就行）。`VACUUM INTO` 是 SQLite 官方给的一致快照做法，
+/// 产出一个单文件、可直接拿去替换或另存。
+#[cfg(feature = "server")]
+pub async fn export_database_snapshot() -> Result<Vec<u8>, String> {
+    use crate::db;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("nekotab-snapshot-{nanos}.sqlite"));
+
+    // VACUUM INTO 要求目标文件不存在；并发的两次导出各有各的时间戳，不会撞
+    let target = path.to_string_lossy().to_string();
+    if let Err(e) = sqlx::query("VACUUM INTO ?")
+        .bind(&target)
+        .execute(db::pool())
+        .await
+    {
+        return Err(format!("生成数据库快照失败: {e}"));
+    }
+
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("读取快照失败: {e}"))?;
+    let _ = tokio::fs::remove_file(&path).await;
+
+    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +1189,7 @@ mod tests {
                 description TEXT NOT NULL DEFAULT '',
                 tags        TEXT NOT NULL DEFAULT '',
                 group_id    INTEGER,
+                icon        TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 sort_order  INTEGER NOT NULL DEFAULT 0,
                 deleted_at  TEXT

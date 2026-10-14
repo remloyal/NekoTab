@@ -27,6 +27,52 @@ enum ModalState {
     BatchMove,
 }
 
+/// 汇总所有书签的标签与条数，按名称排序。标签选择器与标签筛选条都用它。
+fn collect_tags(items: &[Bookmark]) -> Vec<(String, usize)> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+
+    for item in items {
+        for tag in item.tags.split(',') {
+            let tag = tag.trim();
+            if tag.is_empty() {
+                continue;
+            }
+
+            match counts.iter_mut().find(|(name, _)| name == tag) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((tag.to_string(), 1)),
+            }
+        }
+    }
+
+    counts.sort_by(|a, b| a.0.cmp(&b.0));
+    counts
+}
+
+/// 一条书签是否带某个标签。
+fn has_tag(bookmark: &Bookmark, tag: &str) -> bool {
+    bookmark.tags.split(',').any(|t| t.trim() == tag)
+}
+
+/// 把 `dragged` 挪到 `target` 的位置（在传进来的完整顺序上做）。
+///
+/// 落位语义：移除被拖项之后，`target` 所在的位置就是插入点——于是"拖到谁身上
+/// 就占谁的位置"，向左向右都对称（早先的写法向右拖会越过目标一格）。
+/// 两个 id 有一个不在列表里时返回 `None`，调用方据此放弃这次落位。
+fn move_to_position(full: &[i64], dragged: i64, target: i64) -> Option<Vec<i64>> {
+    if dragged == target {
+        return Some(full.to_vec());
+    }
+
+    let mut order = full.to_vec();
+    let from = order.iter().position(|&x| x == dragged)?;
+    order.remove(from);
+    let to = order.iter().position(|&x| x == target)?;
+    order.insert(to, dragged);
+
+    Some(order)
+}
+
 /// 一条书签的有效分组：`group_id` 指向已删除的分组时按「未分组」处理。
 ///
 /// 删除分组时会把组内书签的 `group_id` 清空，正常流程不会留下悬空引用；
@@ -88,47 +134,6 @@ fn wheel_delta_y(evt: &WheelEvent) -> f64 {
     }
 }
 
-/// 把"当前视图的新顺序"合并回全量顺序。
-///
-/// 视图（筛选 + 分页）覆盖到的那些位置，按新顺序重新填充；其余位置原样不动。
-/// 于是"在某一页里拖动"只影响那一页占用的位置，别的书签相对顺序不变——
-/// 而写回服务端的始终是完整顺序，`sort_order` 的语义没有被破坏。
-///
-/// 契约是「`reordered` 恰好是视图中那些 id 的一个排列」。这个前置条件在调用点
-/// 天然成立（新顺序就是从 `view` 里移动元素得到的），但这里仍会先校验一次：
-/// 排序本身是低频操作，多一次比较换来"任何输入都不会把顺序弄乱"，
-/// 比事后排查"某次拖拽之后列表莫名乱了"划算得多。校验不过就原样返回。
-fn merge_order(full: &[i64], viewed: &HashSet<i64>, reordered: &[i64]) -> Vec<i64> {
-    let mut expected: Vec<i64> = full
-        .iter()
-        .copied()
-        .filter(|id| viewed.contains(id))
-        .collect();
-
-    let mut actual = reordered.to_vec();
-    if actual.len() != expected.len() {
-        return full.to_vec();
-    }
-
-    expected.sort_unstable();
-    actual.sort_unstable();
-    if actual != expected {
-        return full.to_vec();
-    }
-
-    let mut queue = reordered.iter();
-    full.iter()
-        .map(|id| {
-            if viewed.contains(id) {
-                // 前面已经校验过是同一个多重集，这里 next() 一定取得到
-                queue.next().copied().unwrap_or(*id)
-            } else {
-                *id
-            }
-        })
-        .collect()
-}
-
 /// 主页：背景 + 设置入口 + 时钟 + 一言 + 搜索引擎框 + 分类标签页 + 图标网格。
 #[component]
 pub fn Home() -> Element {
@@ -176,6 +181,7 @@ pub fn Home() -> Element {
     let mut query = use_signal(String::new);
     let mut search_mode = use_signal(|| SearchMode::Web);
     let mut active_group = use_signal(String::new);
+    let mut active_tag = use_signal(String::new);
     let mut page = use_signal(|| 0usize);
     let mut editing = use_signal(|| false);
     let mut selecting = use_signal(|| false);
@@ -246,6 +252,18 @@ pub fn Home() -> Element {
     };
     let filter = parse_filter(&active_value);
 
+    // 标签：与分组是两个维度——分组管归属（一条只属于一个），标签是检索词（可多个）。
+    // 选中的标签若在结果里已不存在，同样回落到"不筛标签"。
+    let known_tags = collect_tags(&keyword_matched);
+    let selected_tag = active_tag();
+    let active_tag_value = if selected_tag.is_empty()
+        || known_tags.iter().any(|(name, _)| name == &selected_tag)
+    {
+        selected_tag
+    } else {
+        String::new()
+    };
+
     let matched: Vec<Bookmark> = keyword_matched
         .into_iter()
         .filter(|item| match filter {
@@ -253,6 +271,7 @@ pub fn Home() -> Element {
             Filter::Ungrouped => effective_group(item, &known_group_ids).is_none(),
             Filter::Group(id) => effective_group(item, &known_group_ids) == Some(id),
         })
+        .filter(|item| active_tag_value.is_empty() || has_tag(item, &active_tag_value))
         .collect();
 
     // ---- 分页 ----
@@ -345,29 +364,23 @@ pub fn Home() -> Element {
     );
 
     // ---- 拖拽落位 ----
+    //
+    // 落位语义是「把被拖的这条挪到目标那条的位置」，在全量顺序上做，因此
+    // **跨页拖拽也成立**（分页只影响显示，order_ids 始终是全量）。
+    // 早先用的是"在视图内置换"的合并写法，视图外的位置不动；那个写法在跨页时
+    // 会直接失效——被拖的条目不在新页的视图集合里，校验不过就整单放弃。
     let full_ids: Vec<i64> = all_items.iter().map(|item| item.id).collect();
-    let view_ids: Vec<i64> = view.iter().map(|item| item.id).collect();
-    let view_set: HashSet<i64> = view_ids.iter().copied().collect();
-    let view_for_reorder = view_ids.clone();
     let on_reorder = move |(dragged, target): (i64, i64)| {
         if dragged == target {
             return;
         }
 
-        let mut order = view_for_reorder.clone();
-        let (Some(from), Some(to)) = (
-            order.iter().position(|&x| x == dragged),
-            order.iter().position(|&x| x == target),
-        ) else {
+        let Some(order) = move_to_position(&full_ids, dragged, target) else {
             return;
         };
 
-        let moved = order.remove(from);
-        order.insert(to, moved);
-
-        let next = merge_order(&full_ids, &view_set, &order);
         spawn(async move {
-            if reorder_bookmarks(next).await.is_ok() {
+            if reorder_bookmarks(order).await.is_ok() {
                 refresh.set(refresh() + 1);
             }
         });
@@ -392,6 +405,8 @@ pub fn Home() -> Element {
 
     let selected_ids = selected();
     let selected_count = selected_ids.len();
+    // "全选本页"与跨页拖拽都要知道当前页有哪些 id
+    let view_ids: Vec<i64> = view.iter().map(|item| item.id).collect();
     let view_for_select_all = view_ids.clone();
 
     // ---- 翻页 ----
@@ -413,6 +428,8 @@ pub fn Home() -> Element {
 
     // 触屏滑动翻页用这次按下的起点
     let mut swipe_start = use_signal(|| Option::<f64>::None);
+    // 拖拽翻页的节流时间戳
+    let mut last_flip = use_signal(|| 0.0f64);
 
     let delete_title = match &modal() {
         ModalState::ConfirmDelete { message, .. } => message.clone(),
@@ -626,6 +643,42 @@ pub fn Home() -> Element {
                         }
                     }
 
+                    // 标签筛选条。标签是检索词维度，和上面的分组（归属）叠加生效；
+                    // 标签多时这一条横向滚动，不占纵向空间。
+                    if !known_tags.is_empty() {
+                        div { class: "tag-filter",
+                            button {
+                                class: if active_tag_value.is_empty() { "tag-chip active" } else { "tag-chip" },
+                                r#type: "button",
+                                onclick: move |_| {
+                                    active_tag.set(String::new());
+                                    page.set(0);
+                                },
+                                "全部标签"
+                            }
+                            for (tag, count) in known_tags.clone() {
+                                button {
+                                    key: "{tag}",
+                                    class: if tag == active_tag_value { "tag-chip active" } else { "tag-chip" },
+                                    r#type: "button",
+                                    title: if tag == active_tag_value { "取消标签筛选" } else { "按该标签筛选" },
+                                    onclick: {
+                                        let tag = tag.clone();
+                                        let current = active_tag_value.clone();
+                                        move |_| {
+                                            // 再点一次选中项＝取消筛选
+                                            let next = if tag == current { String::new() } else { tag.clone() };
+                                            active_tag.set(next);
+                                            page.set(0);
+                                        }
+                                    },
+                                    "{tag}"
+                                    span { class: "tag-chip-count", "{count}" }
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(err) = error.clone() {
                         div { class: "state state-error", "加载失败：{err}" }
                     } else if loading {
@@ -665,6 +718,21 @@ pub fn Home() -> Element {
                             },
                             on_toggle_select: toggle_select,
                             on_reorder,
+                            // 拖到翻页按钮上翻页：节流一下，免得一次悬停连翻好几页
+                            on_page_flip: move |direction: isize| {
+                                let now = crate::dom::now_ms();
+                                if now - last_flip() < 700.0 {
+                                    return;
+                                }
+                                last_flip.set(now);
+
+                                let target = if direction < 0 {
+                                    current_page.saturating_sub(1)
+                                } else {
+                                    current_page + 1
+                                };
+                                jump_page(target);
+                            },
                         }
 
                         Pager {
@@ -837,6 +905,7 @@ pub fn Home() -> Element {
                         BookmarkForm {
                             bookmark: None,
                             groups: groups.clone(),
+                            known_tags: known_tags.clone(),
                             // 当前就停在某个分组下时，默认归到那一组
                             default_group: match filter {
                                 Filter::Group(id) => Some(id),
@@ -860,6 +929,7 @@ pub fn Home() -> Element {
                             key: "{bookmark.id}",
                             bookmark: Some(bookmark.clone()),
                             groups: groups.clone(),
+                            known_tags: known_tags.clone(),
                             default_group: None,
                             on_cancel: move |_| modal.set(ModalState::None),
                             on_saved: move |_| {
@@ -969,6 +1039,7 @@ mod tests {
             description: description.to_string(),
             tags: tags.to_string(),
             group_id: None,
+            icon: String::new(),
             created_at: String::new(),
         }
     }
@@ -1036,57 +1107,45 @@ mod tests {
     }
 
     #[test]
-    fn merge_order_moves_only_viewed_positions() {
-        // 全量：1 2 3 4 5 6；当前视图是第 3、4 个（id 3 与 4）
-        let full = vec![1, 2, 3, 4, 5, 6];
-        let viewed: HashSet<i64> = [3, 4].into_iter().collect();
-
-        // 视图内把 4 拖到 3 前面
-        let reordered = vec![4, 3];
-        assert_eq!(merge_order(&full, &viewed, &reordered), vec![1, 2, 4, 3, 5, 6]);
-    }
-
-    #[test]
-    fn merge_order_leaves_other_items_untouched() {
-        let full = vec![1, 2, 3, 4, 5];
-        let viewed: HashSet<i64> = [2, 5].into_iter().collect();
-
-        let reordered = vec![5, 2];
-        assert_eq!(merge_order(&full, &viewed, &reordered), vec![1, 5, 3, 4, 2]);
-    }
-
-    #[test]
-    fn merge_order_is_length_preserving() {
+    fn move_lands_on_the_targets_position() {
         let full = vec![1, 2, 3, 4];
-        let viewed: HashSet<i64> = [2, 3].into_iter().collect();
 
-        for reordered in [vec![2, 3], vec![3, 2]] {
-            let merged = merge_order(&full, &viewed, &reordered);
-            assert_eq!(merged.len(), full.len());
-            let mut sorted = merged.clone();
+        // 向右拖：把 1 拖到 3 身上 → 1 占 3 原来的位置
+        assert_eq!(move_to_position(&full, 1, 3).unwrap(), vec![2, 1, 3, 4]);
+        // 向左拖：把 4 拖到 2 身上 → 4 占 2 原来的位置
+        assert_eq!(move_to_position(&full, 4, 2).unwrap(), vec![1, 4, 2, 3]);
+        // 拖到自己身上：顺序不变
+        assert_eq!(move_to_position(&full, 2, 2).unwrap(), full);
+    }
+
+    #[test]
+    fn move_preserves_the_set_of_ids() {
+        let full = vec![10, 20, 30, 40, 50];
+
+        for (dragged, target) in [(10, 50), (50, 10), (30, 30), (20, 40)] {
+            let moved = move_to_position(&full, dragged, target).unwrap();
+            assert_eq!(moved.len(), full.len());
+            let mut sorted = moved.clone();
             sorted.sort_unstable();
             assert_eq!(sorted, full, "不丢条目、不重复");
         }
     }
 
-    /// 契约被破坏时（长度不对、或不是同一批 id）宁可完全不动顺序，
-    /// 也不能吐出重复或缺失的 id —— 那会直接弄乱库里的 sort_order。
     #[test]
-    fn merge_order_rejects_out_of_contract_input() {
+    fn move_rejects_unknown_ids() {
         let full = vec![1, 2, 3];
-        let viewed: HashSet<i64> = [1, 2, 3].into_iter().collect();
-
-        for broken in [vec![3], vec![], vec![1, 2], vec![1, 1, 2], vec![1, 2, 9]] {
-            let merged = merge_order(&full, &viewed, &broken);
-            assert_eq!(merged, full, "非法输入应原样返回：{broken:?}");
-        }
+        assert!(move_to_position(&full, 9, 1).is_none(), "被拖项不在列表里");
+        assert!(move_to_position(&full, 1, 9).is_none(), "目标不在列表里");
     }
 
+    /// 跨页拖拽靠的就是这个：移动在全量顺序上做，与"当前看的是哪一页"无关。
     #[test]
-    fn merge_order_ignores_ids_outside_the_view() {
-        // 视图只覆盖 2、3，新顺序里出现 4（不在视图内）→ 视为非法，整体不动
-        let full = vec![1, 2, 3, 4];
-        let viewed: HashSet<i64> = [2, 3].into_iter().collect();
-        assert_eq!(merge_order(&full, &viewed, &[3, 4]), full);
+    fn move_works_across_pages() {
+        // 全量 1..8，每页 4 条；把第 1 页的 2 拖到第 2 页的 7 身上
+        let full: Vec<i64> = (1..=8).collect();
+        let moved = move_to_position(&full, 2, 7).unwrap();
+        assert_eq!(moved, vec![1, 3, 4, 5, 6, 2, 7, 8]);
+        // 第 2 页（下标 4..8）现在以 2 开头，说明确实跨过去了
+        assert_eq!(&moved[4..8], &[6, 2, 7, 8]);
     }
 }

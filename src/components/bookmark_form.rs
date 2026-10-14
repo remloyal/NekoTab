@@ -1,5 +1,7 @@
 use dioxus::prelude::*;
 
+use super::icon_picker::IconPicker;
+use super::tag_picker::TagPicker;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
 use crate::models::{Bookmark, Group, NewBookmark};
 
@@ -11,6 +13,8 @@ use crate::models::{Bookmark, Group, NewBookmark};
 pub fn BookmarkForm(
     bookmark: Option<Bookmark>,
     groups: Vec<Group>,
+    /// 库里已有的标签与条数，供标签选择器展示
+    known_tags: Vec<(String, usize)>,
     /// 新增时的默认分组（跟着当前筛选走，省得每次都手工选）
     default_group: Option<i64>,
     on_saved: EventHandler<()>,
@@ -30,6 +34,7 @@ pub fn BookmarkForm(
             .unwrap_or_default()
     });
     let mut tags = use_signal(|| existing.as_ref().map(|b| b.tags.clone()).unwrap_or_default());
+    let mut icon = use_signal(|| existing.as_ref().map(|b| b.icon.clone()).unwrap_or_default());
     // 下拉框的值统一用字符串：空串即"未分组"，这样 select 的 value 不必处理 Option
     let mut group_id = use_signal(|| {
         existing
@@ -53,6 +58,7 @@ pub fn BookmarkForm(
             description: description(),
             tags: tags(),
             group_id: group_id().parse().ok(),
+            icon: icon(),
         };
 
         spawn(async move {
@@ -129,17 +135,31 @@ pub fn BookmarkForm(
                     }
                 }
                 p { class: "field-hint",
-                    "分组决定卡片出现在哪个分类标签页下；在设置 → 分组管理里增删。"
+                    "分组决定卡片出现在哪个分类标签页下（一条书签只属于一个分组）；在设置 → 分组管理里增删。"
                 }
             }
 
-            label { class: "field",
-                span { class: "field-label", "标签（可选）" }
-                input {
-                    class: "input",
-                    placeholder: "逗号分隔，用于搜索与筛选，如：开发, 文档",
-                    value: "{tags}",
-                    oninput: move |e| tags.set(e.value()),
+            div { class: "field",
+                span { class: "field-label", "标签" }
+                TagPicker {
+                    value: tags(),
+                    known: known_tags.clone(),
+                    on_change: move |v: String| tags.set(v),
+                }
+                p { class: "field-hint",
+                    "标签是检索词，一条可以带多个，搜索框会匹配它；它不是分类，分类用上面的「分组」。"
+                }
+            }
+
+            div { class: "field",
+                span { class: "field-label", "图标" }
+                IconPicker {
+                    value: icon(),
+                    on_change: move |v: String| icon.set(v),
+                    auto_label: "自动（取站点图标）",
+                }
+                p { class: "field-hint",
+                    "默认按网址自动取站点图标，取不到时回退成名称首字；也可以在这里指定内置图标或图片地址。"
                 }
             }
 

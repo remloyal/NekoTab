@@ -1,18 +1,12 @@
 use dioxus::prelude::*;
 
-use super::icons::{builtin_svg, builtin_value, group_icon, GROUP_ICONS};
+use super::icon_picker::IconPicker;
+use super::icons::group_icon;
 use crate::backend::{add_group, delete_group, error_text, reorder_groups, update_group};
 use crate::models::{Group, NewGroup};
 
 /// 分组名长度上限（与界面上的 `n / 20` 计数一致）。
 const NAME_MAX: usize = 20;
-
-/// 图标选择方式：内置图标 / 自定义图片地址。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum IconMode {
-    Builtin,
-    Custom,
-}
 
 /// 分组管理（设置面板的一节）。
 ///
@@ -24,7 +18,6 @@ pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Elemen
     // 表单草稿
     let mut name = use_signal(String::new);
     let mut icon = use_signal(String::new);
-    let mut icon_mode = use_signal(|| IconMode::Builtin);
     // 正在编辑的分组 id；None 表示"新增"
     let mut editing = use_signal(|| Option::<i64>::None);
 
@@ -38,7 +31,6 @@ pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Elemen
     let mut reset_form = move || {
         name.set(String::new());
         icon.set(String::new());
-        icon_mode.set(IconMode::Builtin);
         editing.set(None);
         error.set(None);
     };
@@ -108,50 +100,9 @@ pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Elemen
 
                 div { class: "field",
                     span { class: "field-label", "图标" }
-                    div { class: "segmented",
-                        button {
-                            class: if icon_mode() == IconMode::Builtin { "segment active" } else { "segment" },
-                            r#type: "button",
-                            onclick: move |_| icon_mode.set(IconMode::Builtin),
-                            "内置图标"
-                        }
-                        button {
-                            class: if icon_mode() == IconMode::Custom { "segment active" } else { "segment" },
-                            r#type: "button",
-                            onclick: move |_| icon_mode.set(IconMode::Custom),
-                            "自定义地址"
-                        }
-                    }
-
-                    if icon_mode() == IconMode::Builtin {
-                        div { class: "icon-grid",
-                            button {
-                                class: if icon().is_empty() { "icon-cell active" } else { "icon-cell" },
-                                r#type: "button",
-                                title: "不用图标（显示名称首字）",
-                                onclick: move |_| icon.set(String::new()),
-                                span { class: "icon-cell-text", "首字" }
-                            }
-                            for (id, label, _) in GROUP_ICONS {
-                                button {
-                                    key: "{id}",
-                                    class: if icon() == builtin_value(id) { "icon-cell active" } else { "icon-cell" },
-                                    r#type: "button",
-                                    title: "{label}",
-                                    onclick: move |_| icon.set(builtin_value(id)),
-                                    if let Some(svg) = builtin_svg(id) {
-                                        {svg}
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        input {
-                            class: "input",
-                            placeholder: "https://example.com/icon.png",
-                            value: "{icon}",
-                            oninput: move |e| icon.set(e.value()),
-                        }
+                    IconPicker {
+                        value: icon(),
+                        on_change: move |v: String| icon.set(v),
                     }
                 }
 
@@ -204,11 +155,6 @@ pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Elemen
                             on_edit: move |target: Group| {
                                 name.set(target.name);
                                 icon.set(target.icon.clone());
-                                icon_mode.set(if target.icon.starts_with("http") {
-                                    IconMode::Custom
-                                } else {
-                                    IconMode::Builtin
-                                });
                                 editing.set(Some(target.id));
                                 error.set(None);
                             },

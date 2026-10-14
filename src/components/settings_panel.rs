@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use super::group_settings::GroupSettings;
 use super::trash_panel::TrashPanel;
+use super::wallpaper_panel::WallpaperPanel;
 use crate::backend::{clear_icon_cache, error_text, import_bookmarks, save_settings};
 use crate::models::{Group, ImportReport, Settings, BACKGROUND_PRESETS, THEMES};
 
@@ -96,6 +97,7 @@ pub fn SettingsPanel(
     let mut reading_file = use_signal(|| false);
     let mut import_error = use_signal(|| Option::<String>::None);
     let mut import_report = use_signal(|| Option::<ImportReport>::None);
+    let mut wallpaper_msg = use_signal(|| Option::<String>::None);
     let mut clearing_icons = use_signal(|| false);
     let mut icon_clear_msg = use_signal(|| Option::<String>::None);
 
@@ -258,6 +260,19 @@ pub fn SettingsPanel(
                                     value: "{draft().background_url}",
                                     oninput: move |e| draft.with_mut(|s| s.background_url = e.value()),
                                 }
+                            }
+
+                            WallpaperPanel {
+                                current: draft().background_url.clone(),
+                                on_pick: move |url: String| {
+                                    draft.with_mut(|s| s.background_url = url);
+                                    saved.set(false);
+                                },
+                                on_message: move |msg: Option<String>| wallpaper_msg.set(msg),
+                            }
+
+                            if let Some(msg) = wallpaper_msg() {
+                                p { class: "field-hint", "{msg}" }
                             }
 
                             label { class: "field",
