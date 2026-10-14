@@ -485,8 +485,7 @@ body {
 }
 
 /* ---------- 搜索联想面板 ---------- */
-/* 吊在整条搜索框下面。本地书签命中在前、「书签」标签，引擎联想在后、「搜索」标签，
-   所以每一行都自带一个去向说明，不必猜点了会怎样。 */
+/* 吊在整条搜索框下面：当前引擎给的联想词，点一下/回车即用它去搜。 */
 .suggest-panel {
     position: absolute;
     top: calc(100% + 8px);
@@ -546,23 +545,6 @@ body {
     white-space: nowrap;
 }
 
-/* 右侧小标签：这一行点下去是"打开书签"还是"拿去搜索" */
-.suggest-kind {
-    flex: 0 0 auto;
-    font-size: 11px;
-    opacity: 0.45;
-}
-
-/* 「本地搜索结果不存在」那一行：只是说明，不可点 */
-.suggest-note {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px 10px;
-    font-size: 12.5px;
-    color: var(--text);
-    opacity: 0.55;
-}
 
 .search-go {
     display: grid;
