@@ -62,7 +62,18 @@ case "$(uname -s)" in
                 win_root="$REPO_ROOT"
             fi
 
-            inner="cd \"\$(wslpath -a '$win_root')\" && NEKOTAB_IN_WSL=1 bash scripts/publish.sh"
+            # 环境变量也要一起带过去：wsl.exe 启动的是全新环境，调用方设的
+            # DRY_RUN / IMAGE / ARCHES 等不会自己传进来。漏掉 DRY_RUN 会变成
+            # 「以为在试跑、其实真推送了」；漏掉 IMAGE 更糟——会推到默认镜像仓库。
+            env_prefix=""
+            for var in IMAGE ARCHES SKIP_BUILD SKIP_LATEST DRY_RUN DOCKER_USER DOCKER_TOKEN \
+                CARGO_TARGET_DIR CROSS_CC; do
+                if [ -n "${!var:-}" ]; then
+                    env_prefix="$env_prefix $(printf '%s=%q' "$var" "${!var}")"
+                fi
+            done
+
+            inner="cd \"\$(wslpath -a '$win_root')\" && NEKOTAB_IN_WSL=1$env_prefix bash scripts/publish.sh"
             for arg in "$@"; do
                 inner="$inner $(printf '%q' "$arg")"
             done
