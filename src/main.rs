@@ -15,9 +15,15 @@ mod lunar;
 mod models;
 mod pages;
 mod routes;
+// 时间的显示格式化：纯计算、无 UI。首屏大时钟与网格里的「数字时钟」组件共用，
+// 放 crate 根是为了不让卡片去依赖页面装饰（或反过来）。
+mod timefmt;
 // 搜索联想：认引擎端点 + 解析响应，服务端才用得上（客户端只调 server function）
 #[cfg(feature = "server")]
 mod suggest;
+// 天气数据源：地址拼装与响应解析，同样只在服务端（浏览器直连会被 CORS 挡）
+#[cfg(feature = "server")]
+mod weather;
 // 快捷添加入口（书签小工具 + POST /api/bookmark）与它的令牌，只在服务端
 #[cfg(feature = "server")]
 mod quickadd;

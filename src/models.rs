@@ -23,6 +23,266 @@ pub struct Bookmark {
     pub span_w: i64,
     /// 卡片纵向占几格
     pub span_h: i64,
+    /// 卡片种类，见 [`is_widget_kind`]：空串＝网址导航，其余是组件。
+    ///
+    /// 组件与书签共用这张表、共用顺序与拖拽，只靠这一列分流，所以列的是
+    /// `kind` 而不是把两类数据拆开——拆开就要重新回答"谁排在前面""两个网格的
+    /// 卡片属性会不会撞车""跨类能不能拖"，而这些问题现在已经有答案了。
+    #[serde(default)]
+    pub kind: String,
+    /// 组件的显示参数（JSON 串）。书签恒为空串。见 [`ClockConfig`]。
+    #[serde(default)]
+    pub config: String,
+}
+
+/// 卡片种类：网址导航（书签）。空串是它的取值，于是"老数据 / 没传"天然落在书签上。
+pub const KIND_BOOKMARK: &str = "";
+
+/// 数字时钟组件。
+pub const KIND_CLOCK: &str = "clock";
+
+/// 表盘时钟组件。
+pub const KIND_DIAL: &str = "dial";
+
+/// 记事本组件。
+pub const KIND_NOTE: &str = "note";
+
+/// 天气组件。
+pub const KIND_WEATHER: &str = "weather";
+
+/// 组件类型白名单：`(kind, 显示名, 内置图标 id)`。
+///
+/// 做成白名单而不是"任意字符串"：`kind` 决定了用哪个组件渲染、参数按哪套规则规范化，
+/// 放任意值进来就等于把渲染层变成一个会收到未知输入的分发器。
+///
+/// 图标取 [`crate::components::icons::GROUP_ICONS`] 的 id，供「添加卡片」弹窗的选卡
+/// 面板用——那一格要是没有图标，就得在渲染处按 kind 再写一次分支。
+pub const WIDGET_KINDS: [(&str, &str, &str); 4] = [
+    (KIND_CLOCK, "数字时钟", "digital"),
+    (KIND_DIAL, "表盘时钟", "clock"),
+    (KIND_NOTE, "记事本", "note"),
+    (KIND_WEATHER, "天气", "cloud"),
+];
+
+/// 这个 kind 是不是（已知的）组件。
+pub fn is_widget_kind(kind: &str) -> bool {
+    WIDGET_KINDS.iter().any(|(known, _, _)| *known == kind)
+}
+
+/// 组件类型的显示名；书签或未知类型返回空串。
+pub fn widget_label(kind: &str) -> &'static str {
+    WIDGET_KINDS
+        .iter()
+        .find(|(known, _, _)| *known == kind)
+        .map(|(_, label, _)| *label)
+        .unwrap_or("")
+}
+
+/// 「数字时钟」组件的显示参数。
+///
+/// 与 `Settings` 里那套 `clock_*` 是两回事：那是首屏大时钟的全局开关，这是**单张
+/// 组件卡片**自己的参数。同一种组件将来可以有多个实例、各自不同，所以参数必须跟着
+/// 卡片走，而不是读全局设置。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClockConfig {
+    /// 12 小时制（带「上午 / 下午」前缀）
+    #[serde(default)]
+    pub hour12: bool,
+    /// 显示秒
+    #[serde(default = "default_true")]
+    pub show_seconds: bool,
+}
+
+/// serde 的字段默认值：`show_seconds` 缺省为真，所以没有这一项的老 JSON 也是显示秒的。
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ClockConfig {
+    fn default() -> Self {
+        Self {
+            hour12: false,
+            show_seconds: true,
+        }
+    }
+}
+
+impl ClockConfig {
+    /// 从库里的 JSON 串还原；解析不了就回落默认值。
+    ///
+    /// 刻意不报错：参数只影响一张卡片怎么画，一条脏数据不该让整页渲染不出来。
+    /// 这与 `Settings::from_pairs` 对非法值的姿态一致。
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    /// 规范化成落库用的 JSON 串。服务端在写入前调它，于是库里存的永远是
+    /// "这一版认识的字段"，而不是调用方塞进来的任意 JSON。
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// 「表盘时钟」组件的显示参数。
+///
+/// 与数字时钟分开一份配置，而不是共用 [`ClockConfig`]：两者听起来像同一个东西，实际
+/// 参数几乎没有交集——这边是"画不画笔"，那边是"12 / 24 小时制"。硬合成一个结构，
+/// 每个字段都要带一句"哪一种时钟才有意义"。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DialConfig {
+    /// 画秒针
+    #[serde(default = "default_true")]
+    pub show_seconds: bool,
+    /// 刻度写成数字（1–12）而不是短线
+    #[serde(default)]
+    pub show_numbers: bool,
+}
+
+impl Default for DialConfig {
+    fn default() -> Self {
+        Self {
+            show_seconds: true,
+            show_numbers: false,
+        }
+    }
+}
+
+impl DialConfig {
+    /// 从库里的 JSON 串还原；解析不了就回落默认值（与另外两种组件同一条姿态）。
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// 记事本能存多少字符。///
+/// 上限是必要的：内容是自由文本，一次粘贴就可能是一整篇文档，而它会进列表接口的每一
+/// 次响应（`config` 跟着卡片一起返回）。2000 字够写待办与备忘，也保证一屏卡片的数据
+/// 量级不至于失控。
+pub const NOTE_MAX_CHARS: usize = 2000;
+
+/// 「记事本」组件的内容。
+///
+/// 目前只有一个字段，仍然走 JSON 而不是把正文直接塞进 `config`：一来别的组件已经是
+/// JSON，两边不一致会让规范化那条路要分叉；二来字号、对齐这类开关迟早要加，那时不必
+/// 再迁一次数据。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NoteConfig {
+    #[serde(default)]
+    pub text: String,
+}
+
+impl NoteConfig {
+    /// 从库里的 JSON 串还原；解析不了就回落空笔记（不是报错）。
+    ///
+    /// 与 [`ClockConfig::parse`] 同一条姿态：参数只影响一张卡片怎么画，
+    /// 一条脏数据不该让整页渲染不出来。
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// 收到合法范围内的正文：按字符数截断、去掉首尾空白。    ///
+    /// 按**字符**而不是字节截断——中文一个字三字节，按字节切会切出半个字。
+    ///
+    /// 只有服务端落库前调它（表单那边用 `maxlength` 拦一道，但那是体验、不是保证），
+    /// 所以 web 侧编译时它是死代码。
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub fn clean(text: &str) -> String {
+        text.trim()
+            .chars()
+            .take(NOTE_MAX_CHARS)
+            .collect::<String>()
+            // 截断可能正好切在末尾空白上，再收一次
+            .trim_end()
+            .to_string()
+    }
+}
+
+/// 地点名能有多长。
+///
+/// 它会被拼进地理编码接口的查询串，长度上限既是防手滑贴进一整段地址，
+/// 也是给上游留个限度。
+pub const WEATHER_MAX_LOCATION_CHARS: usize = 60;
+
+/// 「天气」组件的参数。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WeatherConfig {
+    /// 地点名（如「北京」「Shanghai」）。交给数据源的地理编码接口查坐标，
+    /// 所以填人类看得懂的地名即可，不用填经纬度。空串表示还没设过。
+    #[serde(default)]
+    pub location: String,
+    /// 用华氏度（默认摄氏度）
+    #[serde(default)]
+    pub fahrenheit: bool,
+}
+
+impl WeatherConfig {
+    /// 从库里的 JSON 串还原；解析不了就回落默认值（与另外几种组件同一条姿态）。
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// 收到合法范围内的地点名：去掉首尾空白、按字符数截断。
+    ///
+    /// 按**字符**截断而不是字节——地名多为中文，按字节切会切出半个字。
+    /// 写库和发请求前各调一次，于是"库里存的"和"发出去的"是同一个值。
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub fn clean_location(text: &str) -> String {
+        text.trim()
+            .chars()
+            .take(WEATHER_MAX_LOCATION_CHARS)
+            .collect()
+    }
+}
+
+/// 一次天气查询的结果。服务端填好，客户端只负责画。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Weather {
+    /// 数据源回填的规范地名。可能和用户输入的不完全一样（「北京」→「北京市」），
+    /// 显示它比显示用户输入更能说明"查的是哪儿"。
+    pub place: String,
+    /// 当前气温
+    pub temperature: f64,
+    /// 今日最高
+    pub high: f64,
+    /// 今日最低
+    pub low: f64,
+    /// WMO 天气代码，见 [`weather_label`]
+    pub code: u32,
+}
+
+/// WMO 天气代码 → `(中文描述, 图示)`。
+///
+/// 分档按数据源文档给的 WMO 代码表归并：细到 51/53/55（小/中/大毛毛雨）那种程度的
+/// 区分在一张小卡片上读不出来，同组共用一个说法反而更清楚。
+///
+/// 认不出的代码回落成「未知」而不是空串——卡片上显示一个空白比显示「未知」更像坏了。
+pub fn weather_label(code: u32) -> (&'static str, &'static str) {
+    match code {
+        0 => ("晴", "☀️"),
+        1 => ("晴间多云", "🌤️"),
+        2 => ("多云", "⛅"),
+        3 => ("阴", "☁️"),
+        45 | 48 => ("雾", "🌫️"),
+        51 | 53 | 55 | 56 | 57 => ("毛毛雨", "🌦️"),
+        61 | 63 | 65 | 66 | 67 => ("雨", "🌧️"),
+        71 | 73 | 75 | 77 => ("雪", "❄️"),
+        80 | 81 | 82 => ("阵雨", "🌦️"),
+        85 | 86 => ("阵雪", "🌨️"),
+        95 | 96 | 99 => ("雷雨", "⛈️"),
+        _ => ("未知", "❓"),
+    }
 }
 
 /// 新增/修改书签的入参。
@@ -44,6 +304,19 @@ pub struct NewBookmark {
     pub span_w: i64,
     #[serde(default)]
     pub span_h: i64,
+    /// 卡片种类；空串（缺省）＝网址导航，见 [`is_widget_kind`]
+    #[serde(default)]
+    pub kind: String,
+    /// 组件参数（JSON 串）；书签留空。服务端会按 kind 规范化后再落库。
+    #[serde(default)]
+    pub config: String,
+}
+
+impl Bookmark {
+    /// 这张卡片是不是组件。未知 kind 按书签处理——渲染层因此不会碰到没见过的分支。
+    pub fn is_widget(&self) -> bool {
+        is_widget_kind(&self.kind)
+    }
 }
 
 /// 新增书签的结果。
@@ -622,8 +895,164 @@ mod tests {
     }
 
     #[test]
-    fn system_theme_resolves() {
-        let mut settings = Settings::default();
+    fn bookmark_kind_defaults_to_bookmark() {
+        // 缺 kind 的 JSON（老备份、老接口调用方）必须落成书签，而不是未知类型
+        let parsed: Bookmark = serde_json::from_str(
+            r#"{"id":1,"title":"A","url":"https://a.com","description":"","tags":"",
+                "group_id":null,"icon":"","created_at":"","span_w":1,"span_h":1}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.kind, "");
+        assert_eq!(parsed.config, "");
+        assert!(!parsed.is_widget(), "空 kind 是书签");
+    }
+
+    #[test]
+    fn widget_kind_is_recognised_and_labelled() {
+        assert!(is_widget_kind(KIND_CLOCK));
+        assert!(!is_widget_kind(KIND_BOOKMARK), "空串是书签，不是组件");
+        assert!(!is_widget_kind("rainbow"), "白名单外的不算组件");
+        assert_eq!(widget_label(KIND_CLOCK), "数字时钟");
+        assert_eq!(widget_label("rainbow"), "");
+        // 选卡面板直接拿白名单里的图标 id 去画，所以每一项都得指到一个真存在的图标
+        for (kind, label, icon) in WIDGET_KINDS {
+            assert!(!label.is_empty(), "{kind} 没有显示名");
+            assert!(
+                crate::components::icons::builtin_id(&format!("i:{icon}")).is_some(),
+                "{kind} 引用了不存在的内置图标：{icon}"
+            );
+        }
+    }
+
+    #[test]
+    fn clock_config_falls_back_to_defaults_on_junk() {
+        let default = ClockConfig::default();
+        assert!(!default.hour12, "默认 24 小时制");
+        assert!(default.show_seconds, "默认显示秒");
+
+        // 空串（书签那一侧的取值）、乱码、非对象 JSON 一律回落默认，不许 panic
+        for junk in ["", "not json", "[]", "123", "null"] {
+            assert_eq!(ClockConfig::parse(junk), default, "脏数据 {junk:?} 应回落默认");
+        }
+    }
+
+    #[test]
+    fn clock_config_round_trips_and_fills_missing_fields() {
+        let config = ClockConfig {
+            hour12: true,
+            show_seconds: false,
+        };
+        assert_eq!(ClockConfig::parse(&config.to_json()), config);
+
+        // 只写了 hour12：缺的 show_seconds 按"真"补，而不是按 bool 的默认假
+        let partial = ClockConfig::parse(r#"{"hour12":true}"#);
+        assert_eq!(
+            partial,
+            ClockConfig {
+                hour12: true,
+                show_seconds: true
+            }
+        );
+    }
+
+    #[test]
+    fn weather_config_defaults_and_trims_location() {
+        let default = WeatherConfig::default();
+        assert_eq!(default.location, "");
+        assert!(!default.fahrenheit, "默认摄氏度");
+
+        for junk in ["", "not json", "[]", "123", "null"] {
+            assert_eq!(WeatherConfig::parse(junk), default, "脏数据 {junk:?} 应回落默认");
+        }
+
+        assert_eq!(WeatherConfig::clean_location("  北京  "), "北京");
+        // 按字符截断：中文一个字三字节，按字节切会切出半个字
+        let long = "京".repeat(WEATHER_MAX_LOCATION_CHARS + 20);
+        let cleaned = WeatherConfig::clean_location(&long);
+        assert_eq!(cleaned.chars().count(), WEATHER_MAX_LOCATION_CHARS);
+        assert!(cleaned.chars().all(|character| character == '京'));
+
+        let config = WeatherConfig {
+            location: "上海".to_string(),
+            fahrenheit: true,
+        };
+        assert_eq!(WeatherConfig::parse(&config.to_json()), config);
+    }
+
+    #[test]
+    fn weather_codes_have_a_label_and_an_icon() {
+        // 每一档都要有说法和图示，且认不出的代码不能回落到空串
+        for code in [0u32, 1, 2, 3, 45, 48, 51, 55, 61, 65, 71, 77, 82, 86, 95, 99] {
+            let (label, icon) = weather_label(code);
+            assert!(!label.is_empty(), "代码 {code} 没有描述");
+            assert_ne!(label, "未知", "代码 {code} 应该是认得的");
+            assert!(!icon.is_empty(), "代码 {code} 没有图示");
+        }
+
+        let (label, icon) = weather_label(9999);
+        assert_eq!(label, "未知");
+        assert!(!icon.is_empty(), "未知也要有个图示，不能是空白");
+    }
+
+    #[test]
+    fn dial_config_falls_back_to_defaults_on_junk() {
+        let default = DialConfig::default();
+        assert!(default.show_seconds, "默认画秒针");
+        assert!(!default.show_numbers, "默认用短线刻度");
+
+        for junk in ["", "not json", "[]", "123", "null"] {
+            assert_eq!(DialConfig::parse(junk), default, "脏数据 {junk:?} 应回落默认");
+        }
+    }
+
+    #[test]
+    fn dial_config_round_trips_and_fills_missing_fields() {
+        let config = DialConfig {
+            show_seconds: false,
+            show_numbers: true,
+        };
+        assert_eq!(DialConfig::parse(&config.to_json()), config);
+
+        // 只写了 show_numbers：缺的 show_seconds 按"真"补
+        assert_eq!(
+            DialConfig::parse(r#"{"show_numbers":true}"#),
+            DialConfig {
+                show_seconds: true,
+                show_numbers: true
+            }
+        );
+    }
+
+    #[test]
+    fn note_config_falls_back_to_empty_on_junk() {
+        let empty = NoteConfig::default();
+        for junk in ["", "not json", "[]", "123", "null"] {
+            assert_eq!(NoteConfig::parse(junk), empty, "脏数据 {junk:?} 应回落空笔记");
+        }
+    }
+
+    #[test]
+    fn note_config_round_trips() {
+        let note = NoteConfig {
+            text: "第一行\n第二行".to_string(),
+        };
+        assert_eq!(NoteConfig::parse(&note.to_json()), note);
+    }
+
+    #[test]
+    fn note_text_is_trimmed_and_capped() {
+        assert_eq!(NoteConfig::clean("  你好  "), "你好", "首尾空白去掉");
+        assert_eq!(NoteConfig::clean("a\n\nb"), "a\n\nb", "中间的换行与空行要保留");
+
+        // 超长按**字符**截断：中文一个字三字节，按字节切会切出半个字
+        let long = "字".repeat(NOTE_MAX_CHARS + 50);
+        let cleaned = NoteConfig::clean(&long);
+        assert_eq!(cleaned.chars().count(), NOTE_MAX_CHARS);
+        assert!(cleaned.chars().all(|character| character == '字'));
+    }
+
+    #[test]
+    fn system_theme_resolves() {        let mut settings = Settings::default();
 
         settings.theme = "light".to_string();
         assert_eq!(settings.effective_theme(Some(true)), "light", "定死浅色不看系统");

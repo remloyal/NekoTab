@@ -933,6 +933,211 @@ body {
     box-shadow: none;
 }
 
+/* ---------- 组件卡片 ---------- */
+/* 组件和书签共用 .tile 这一层——跨度、容器查询、hover、编辑态与选择态的角标
+   全都要，所以这里只改"正文怎么排"，不重写卡片本身。 */
+.tile-widget {
+    padding: 10px;
+    gap: 0;
+}
+
+/* 普通态的组件没有可去的地方（url 是空串），别给出手指光标 */
+.grid:not(.editing):not(.selecting) .tile-widget {
+    cursor: default;
+}
+
+.widget {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: calc(100cqh * 0.04);
+    width: 100%;
+    height: 100%;
+    color: var(--text);
+    /* 裁在自己的格子里。行高是固定的（--tile-row 配跨度），内容一旦溢出就会盖住
+       相邻卡片，而"盖住别人"比"自己少显示一点"难查得多。 */
+    overflow: hidden;
+}
+
+.widget-clock-time {
+    /* 字号同时受格子的宽和高约束：高度决定"能多大"，宽度决定"放不放得下"。
+       只按高度算会在 2×2 里把 `16:56:41` 撑出卡片（八个字符按高度能到 60px，
+       一行要 260px，而格子只有 200px），被 overflow 裁成 `6:56:4` 这种残句。
+       0.22 是按 tabular-nums 下八个字符的宽度倒推的。 */
+    font-size: min(calc(100cqw * 0.22), calc(100cqh * 0.34));
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    white-space: nowrap;
+}
+
+/* 12 小时制多了「上午 / 下午」（两个全角字 + 空格），同样宽度下字号要再小一档 */
+.widget-clock--h12 .widget-clock-time {
+    font-size: min(calc(100cqw * 0.145), calc(100cqh * 0.28));
+}
+
+.widget-clock-date {
+    /* 同理按宽度收一档；「10月15日 星期四」比时间短，但仍是定长文本 */
+    font-size: min(calc(100cqw * 0.13), calc(100cqh * 0.10));
+    line-height: 1.2;
+    white-space: nowrap;
+    opacity: 0.75;
+}
+
+/* 只占一行时（1×1 / 2×1）日期挤不下，留着只会把时间字号压小，索性不显示。
+   容器就是 .tile（它带 `container-type: size`），所以这里问的是"这个格子有多高"：
+   一行约 101px（96px 卡片时），两行起才越过这个阈值。 */
+@container (max-height: 160px) {
+    .widget-clock-date {
+        display: none;
+    }
+}
+
+/* 记事本：正文从左上角排起、按行读，换行照原样保留。
+   和时钟不同，它不是"居中一块大数字"，所以这里把 .widget 的居中改掉。 */
+.widget-note {
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 0;
+    padding: 2px;
+}
+
+.widget-note-text {
+    /* 字号同时受格子的宽和高约束（与时钟同一条理由：只按高算会在窄格子里横向溢满），
+       系数按"一行放得下十来个汉字"倒推 */
+    font-size: min(calc(100cqw * 0.085), calc(100cqh * 0.11));
+    line-height: 1.45;
+    /* 换行与连续空格照原样显示；长串（网址之类）也允许在任意处断行，
+       否则它会横向撑破格子 */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    opacity: 0.92;
+}
+
+.widget-note-empty {
+    /* 空笔记时把提示居中——但只在"没有内容"这一种情况下居中，
+       所以用 auto 外边距而不是改父级对齐 */
+    margin: auto;
+    font-size: min(calc(100cqw * 0.08), calc(100cqh * 0.11));
+    color: var(--text-dim);
+}
+
+/* ---------- 表盘时钟 ---------- */
+/* 等比缩放交给 SVG 自己（viewBox 0..100 + 默认的 preserveAspectRatio: xMidYMid meet）：
+   格子未必是正方形，靠它把圆保持在正中。所以这里只让画布铺满，不动 .widget 的居中。 */
+.widget-dial {
+    gap: 0;
+}
+
+.dial {
+    width: 100%;
+    height: 100%;
+}
+
+/* 盘面：极淡一层，压在壁纸上仍看得出圆形边界，但不挡背景 */
+.dial-face {
+    fill: var(--hover-soft);
+    stroke: var(--border);
+    stroke-width: 1.5;
+}
+
+/* 以下 stroke-width 都是 viewBox 单位，随表盘一起缩放 */
+.dial-tick {
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    opacity: 0.5;
+}
+
+.dial-number {
+    fill: currentColor;
+    font-size: 11px;
+    text-anchor: middle;
+    /* 让数字以给定坐标为中心，否则基线落在坐标上、整圈会歪一点 */
+    dominant-baseline: central;
+    opacity: 0.72;
+}
+
+.dial-hand {
+    stroke: currentColor;
+    stroke-linecap: round;
+}
+
+.dial-hour {
+    stroke-width: 3.4;
+}
+
+.dial-minute {
+    stroke-width: 2.4;
+}
+
+/* 秒针用强调色：一眼能和另外两根分开，也是这排卡片里最"活"的一处 */
+.dial-second {
+    stroke: var(--accent);
+    stroke-width: 1.1;
+}
+
+.dial-pin {
+    fill: currentColor;
+}
+
+/* ---------- 天气 ---------- */
+/* 三行：图示 + 气温、地名、天气与今日高低。字号同样取宽高的小者——
+   天气卡常常被设成 1×2 或 2×1，只按高度算会在窄格里横向溢满。 */
+.widget-weather {
+    gap: calc(100cqh * 0.02);
+}
+
+.widget-weather-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: calc(100cqw * 0.04);
+}
+
+.widget-weather-icon {
+    font-size: min(calc(100cqw * 0.16), calc(100cqh * 0.26));
+    line-height: 1;
+}
+
+.widget-weather-temp {
+    font-size: min(calc(100cqw * 0.20), calc(100cqh * 0.30));
+    font-weight: 700;
+    line-height: 1;
+    /* 数字等宽：温度每秒不变，但换城市时不该左右跳 */
+    font-variant-numeric: tabular-nums;
+}
+
+.widget-weather-place {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: min(calc(100cqw * 0.10), calc(100cqh * 0.12));
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.8;
+}
+
+.widget-weather-meta {
+    font-size: min(calc(100cqw * 0.085), calc(100cqh * 0.10));
+    line-height: 1.3;
+    white-space: nowrap;
+    opacity: 0.65;
+}
+
+/* 还没配置 / 还没取到 / 取不到——三种都是"卡片上的一句话"，居中显示 */
+.widget-weather-note {
+    margin: auto;
+    max-width: 100%;
+    padding: 0 6%;
+    font-size: min(calc(100cqw * 0.08), calc(100cqh * 0.11));
+    line-height: 1.4;
+    text-align: center;
+    color: var(--text-dim);
+}
+
 /* ---------- 分页器 ---------- */
 .pager {
     display: flex;
@@ -1177,6 +1382,88 @@ body {
     overflow-y: auto;
 }
 
+/* ---------- 「添加卡片」弹窗 ---------- */
+/* 标签按钮复用页面上的 .tab（同一套视觉语言：高亮 + 下划线），这里只管排布。
+   页面上的 .tabs 是居中且下边距 22px，弹窗里要左对齐、贴住内容。 */
+.card-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+
+/* 选卡面板：每一项是一张"可加什么"的卡片，不是真的卡片——点它是选种类 */
+.card-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    gap: 10px;
+}
+
+.picker-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+    padding: 14px 8px 12px;
+    color: var(--text);
+    background: var(--field-bg);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    cursor: pointer;
+    font: inherit;
+    transition: border-color 0.15s, transform 0.15s, background 0.15s;
+}
+
+.picker-item:hover {
+    border-color: var(--accent);
+    background: var(--hover-soft);
+    transform: translateY(-2px);
+}
+
+.picker-icon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    color: var(--text);
+    background: var(--accent-soft);
+    border-radius: 11px;
+}
+
+.picker-icon svg {
+    width: 22px;
+    height: 22px;
+}
+
+.picker-label {
+    font-size: 13px;
+    line-height: 1.3;
+}
+
+/* 「已添加」的标记。刻意不把这一项置灰：点进去是它的设置，置灰等于把人堵在这儿 */
+.picker-note {
+    font-size: 11px;
+    line-height: 1;
+    color: var(--text-dim);
+}
+
+/* 选好一种组件后的返回行 */
+.picker-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.picker-head .btn-ghost {
+    padding: 4px 10px;
+    font-size: 12.5px;
+}
+
+.picker-head-label {
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
 /* ---------- 表单 ---------- */
 .form {
     display: flex;
@@ -1188,6 +1475,14 @@ body {
     display: flex;
     flex-direction: column;
     gap: 6px;
+}
+
+/* 多行输入（记事本正文）。沿用 .input 的外观，只补上文本域需要的两条：
+   能纵向拉高、以及给一个不至于只露一行的初始高度。 */
+.textarea {
+    min-height: 104px;
+    line-height: 1.5;
+    resize: vertical;
 }
 
 .field-label {

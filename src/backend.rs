@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 use crate::models::{
     AddOutcome, Bookmark, Engine, Group, ImportReport, NewBookmark, NewEngine, NewGroup, Quote,
-    Settings, TrashItem,
+    Settings, TrashItem, Weather,
 };
 // 只在服务端的入库校验里用到（客户端的夹取在组件层）
 #[cfg(feature = "server")]
@@ -52,17 +52,26 @@ fn like_pattern(word: &str) -> String {
 /// 绑定 4 个相同的模式参数。
 ///
 /// 回收站里的条目（`deleted_at` 非空）永远不出现在这里。
+///
+/// `bookmarks_only` 为真时排除组件。**导出**走这一档：组件不是书签，写进给浏览器
+/// 导入的书签文件只会得到一条打不开的 `widget:` 链接。列表查询则两样都要，前端再按
+/// kind 分流（组件置顶、不参与筛选与分页）。
 #[cfg(feature = "server")]
-fn build_search_sql(keyword_count: usize) -> String {
+fn build_search_sql(keyword_count: usize, bookmarks_only: bool) -> String {
     const CLAUSE: &str = "(title LIKE ? ESCAPE '\\' \
                            OR url LIKE ? ESCAPE '\\' \
                            OR description LIKE ? ESCAPE '\\' \
                            OR tags LIKE ? ESCAPE '\\')";
 
     let mut sql = String::from(
-        "SELECT id, title, url, description, tags, group_id, icon, created_at, span_w, span_h \
+        "SELECT id, title, url, description, tags, group_id, icon, created_at, span_w, span_h, \
+         kind, config \
          FROM bookmarks WHERE deleted_at IS NULL",
     );
+
+    if bookmarks_only {
+        sql.push_str(" AND kind = ''");
+    }
 
     if keyword_count > 0 {
         let clauses = vec![CLAUSE; keyword_count];
@@ -85,18 +94,93 @@ pub(crate) struct CleanBookmark {
     pub icon: String,
     pub span_w: i64,
     pub span_h: i64,
+    pub kind: String,
+    pub config: String,
 }
 
-/// 校验并规范化书签入参。新增与修改共用，避免两处校验漂移。
+/// 校验并规范化卡片入参。新增与修改共用，避免两处校验漂移。
+///
+/// 书签与组件分两条路走：书签必须有合法网址、可以进分组带标签；组件没有网址，
+/// 也不属于任何分组（分组标签页算的是书签），参数按 kind 规范化后落库。
 #[cfg(feature = "server")]
 async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
+    use crate::models::{
+        is_widget_kind, ClockConfig, DialConfig, NoteConfig, WeatherConfig, KIND_CLOCK, KIND_DIAL,
+        KIND_NOTE, KIND_WEATHER,
+    };
+
     let title = input.title.trim().to_string();
-    let url = input.url.trim().to_string();
-    let description = input.description.trim().to_string();
+    let kind = input.kind.trim().to_string();
+
+    if !kind.is_empty() && !is_widget_kind(&kind) {
+        return Err(format!("不认识的卡片类型：{kind}"));
+    }
 
     if title.is_empty() {
         return Err("标题不能为空".to_string());
     }
+
+    // 图标：空串=自动代取，其余与分组图标同一套约定。两类卡片共用这一条。
+    let icon = input.icon.trim().to_string();
+    let icon_ok = icon.is_empty()
+        || icon.starts_with("i:")
+        || icon.starts_with("http://")
+        || icon.starts_with("https://")
+        || icon.starts_with('/');
+    if !icon_ok {
+        return Err("图标需为内置图标、http(s) 地址或以 / 开头的本站路径".to_string());
+    }
+
+    // 跨度在这里夹好：0（老备份、调用方没传）会被抬到 1
+    let span_w = clamp_span(input.span_w);
+    let span_h = clamp_span(input.span_h);
+
+    // ---- 组件 ----
+    if !kind.is_empty() {
+        // 参数按类型规范化：只留这一版认识的字段，调用方塞进来的多余内容落不了库。
+        // 解析失败回落默认值，不报错——参数只是显示开关，不值得为它拒收一张卡片。
+        let config = match kind.as_str() {
+            KIND_CLOCK => ClockConfig::parse(&input.config).to_json(),
+            KIND_DIAL => DialConfig::parse(&input.config).to_json(),
+            KIND_NOTE => {
+                // 正文额外收一道：按字符数截断、去掉首尾空白。它是自由文本，一次粘贴
+                // 就可能上千字，而 config 会跟着列表接口的每次响应一起回去。
+                let text = NoteConfig::parse(&input.config).text;
+                NoteConfig {
+                    text: NoteConfig::clean(&text),
+                }
+                .to_json()
+            }
+            KIND_WEATHER => {
+                // 地点名同样收一道：它会被拼进上游的查询串
+                let config = WeatherConfig::parse(&input.config);
+                WeatherConfig {
+                    location: WeatherConfig::clean_location(&config.location),
+                    fahrenheit: config.fahrenheit,
+                }
+                .to_json()
+            }
+            _ => String::new(),
+        };
+
+        return Ok(CleanBookmark {
+            title,
+            // 组件没有网址。留空而不是硬塞一个伪地址：伪地址会在"按网址去重"和
+            // "导出成书签文件"这两条路上变成需要打补丁的特例。
+            url: String::new(),
+            description: input.description.trim().to_string(),
+            tags: String::new(),
+            group_id: None,
+            icon,
+            span_w,
+            span_h,
+            kind,
+            config,
+        });
+    }
+
+    // ---- 书签 ----
+    let url = input.url.trim().to_string();
     if url.is_empty() {
         return Err("URL 不能为空".to_string());
     }
@@ -115,27 +199,18 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
         None => None,
     };
 
-    // 图标：空串=自动代取，其余与分组图标同一套约定
-    let icon = input.icon.trim().to_string();
-    let icon_ok = icon.is_empty()
-        || icon.starts_with("i:")
-        || icon.starts_with("http://")
-        || icon.starts_with("https://")
-        || icon.starts_with('/');
-    if !icon_ok {
-        return Err("图标需为内置图标、http(s) 地址或以 / 开头的本站路径".to_string());
-    }
-
     Ok(CleanBookmark {
         title,
         url,
-        description,
+        description: input.description.trim().to_string(),
         tags: normalize_tags(&input.tags),
         group_id,
         icon,
-        // 跨度在这里夹好：0（老备份、调用方没传）会被抬到 1
-        span_w: clamp_span(input.span_w),
-        span_h: clamp_span(input.span_h),
+        span_w,
+        span_h,
+        kind,
+        // 书签没有组件参数
+        config: String::new(),
     })
 }
 
@@ -172,7 +247,9 @@ pub async fn list_bookmarks(query: String) -> Result<Vec<Bookmark>, ServerFnErro
     use crate::db;
 
     let keywords: Vec<String> = query.split_whitespace().map(str::to_string).collect();
-    let sql = build_search_sql(keywords.len());
+    // 组件也要取回来：首页按 kind 分流（组件置顶、不参与筛选与分页），
+    // 少了一边就得再发一次请求，还会让两边顺序对不上。
+    let sql = build_search_sql(keywords.len(), false);
 
     // 该 SQL 仅由固定模板拼成，文本中不含任何用户输入；关键词一律 bind 传参。
     let mut q = sqlx::query_as::<_, Bookmark>(sqlx::AssertSqlSafe(sql));
@@ -188,11 +265,13 @@ pub async fn list_bookmarks(query: String) -> Result<Vec<Bookmark>, ServerFnErro
         .map_err(|e| ServerFnError::new(format!("查询书签失败: {e}")))
 }
 
-/// 落库一条新书签，写之前按 URL 去重。新记录排在列表最前
+/// 落库一张新卡片，写之前先去重。新记录排在列表最前
 /// （`sort_order` 取当前最小值再减一）。
 ///
-/// 去重口径与导入（[`import_bookmarks`]）一致：URL 字符串完全相同即算重复，
-/// **回收站里的也算**——否则同一网址会一边躺在回收站、一边又出现在列表里。
+/// **去重口径按种类分**：书签比 URL 字符串（与导入一致），组件比 `kind`——组件没有
+/// 网址，按空网址去重会让第二张组件被判成"已存在"而静默不写入；按 kind 比则正好
+/// 表达"时钟只要一个"。两条都**把回收站里的算进去**，否则同一网址（或同一个组件）
+/// 会一边躺在回收站、一边又出现在列表里。
 /// 命中时返回已有记录的 id 且 `created == false`，由调用方决定怎么提示，
 /// 这里不报错（"已存在"不是失败，静默再插一条才是问题）。
 ///
@@ -202,15 +281,26 @@ pub(crate) async fn insert_new_bookmark(
     pool: &sqlx::SqlitePool,
     row: CleanBookmark,
 ) -> Result<AddOutcome, String> {
-    // 同一个 URL 有多条（历史遗留）时，优先命中正常条目，其次才是回收站里的
-    let existing: Option<(i64, Option<String>)> = sqlx::query_as(
-        "SELECT id, deleted_at FROM bookmarks WHERE url = ? \
-         ORDER BY (deleted_at IS NOT NULL) ASC, id ASC LIMIT 1",
-    )
-    .bind(&row.url)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("检查重复失败: {e}"))?;
+    // 同一条命中多个（历史遗留）时，优先命中正常条目，其次才是回收站里的
+    let existing: Option<(i64, Option<String>)> = if row.kind.is_empty() {
+        sqlx::query_as(
+            "SELECT id, deleted_at FROM bookmarks WHERE kind = '' AND url = ? \
+             ORDER BY (deleted_at IS NOT NULL) ASC, id ASC LIMIT 1",
+        )
+        .bind(&row.url)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("检查重复失败: {e}"))?
+    } else {
+        sqlx::query_as(
+            "SELECT id, deleted_at FROM bookmarks WHERE kind = ? \
+             ORDER BY (deleted_at IS NOT NULL) ASC, id ASC LIMIT 1",
+        )
+        .bind(&row.kind)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("检查重复失败: {e}"))?
+    };
 
     if let Some((id, deleted_at)) = existing {
         return Ok(AddOutcome {
@@ -220,10 +310,11 @@ pub(crate) async fn insert_new_bookmark(
         });
     }
 
+    let kind = row.kind;
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO bookmarks \
-         (title, url, description, tags, group_id, icon, span_w, span_h, sort_order) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, \
+         (title, url, description, tags, group_id, icon, span_w, span_h, kind, config, sort_order) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
                  COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
@@ -235,9 +326,17 @@ pub(crate) async fn insert_new_bookmark(
     .bind(row.icon)
     .bind(row.span_w)
     .bind(row.span_h)
+    .bind(&kind)
+    .bind(row.config)
     .fetch_one(pool)
     .await
-    .map_err(|e| format!("保存书签失败: {e}"))?;
+    .map_err(|e| {
+        if kind.is_empty() {
+            format!("保存书签失败: {e}")
+        } else {
+            format!("保存卡片失败: {e}")
+        }
+    })?;
 
     Ok(AddOutcome {
         id,
@@ -281,6 +380,9 @@ pub(crate) async fn quick_add(
             // 快捷添加只给 URL，格子尺寸用默认的一格
             span_w: 1,
             span_h: 1,
+            // 快捷添加只会加书签——它拿到的就是一个网址
+            kind: crate::models::KIND_BOOKMARK.to_string(),
+            config: String::new(),
         },
     )
     .await
@@ -307,13 +409,14 @@ pub(crate) async fn ensure_url_not_taken(
         return Ok(());
     }
 
-    let taken: Option<i64> =
-        sqlx::query_scalar("SELECT id FROM bookmarks WHERE url = ? AND id <> ? LIMIT 1")
-            .bind(url)
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("检查重复失败: {e}"))?;
+    let taken: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM bookmarks WHERE kind = '' AND url = ? AND id <> ? LIMIT 1",
+    )
+    .bind(url)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("检查重复失败: {e}"))?;
 
     if taken.is_some() {
         return Err("该网址已被另一条书签使用".to_string());
@@ -322,7 +425,10 @@ pub(crate) async fn ensure_url_not_taken(
     Ok(())
 }
 
-/// 新增书签，返回新记录 id（重复则不写入，见 [`insert_new_bookmark`]）。
+/// 新增卡片，返回新记录 id（重复则不写入，见 [`insert_new_bookmark`]）。
+///
+/// 书签与组件共用这一个入口：入参里的 `kind` 决定它是哪一种。多一个"加组件"的
+/// 接口只会让两边各写一遍校验与去重，而那正是最容易漂移的地方。
 #[server]
 pub async fn add_bookmark(input: NewBookmark) -> Result<AddOutcome, ServerFnError> {
     use crate::db;
@@ -334,20 +440,24 @@ pub async fn add_bookmark(input: NewBookmark) -> Result<AddOutcome, ServerFnErro
         .map_err(ServerFnError::new)
 }
 
-/// 修改已有书签（标题 / URL / 描述 / 标签 / 分组 / 图标 / 格子尺寸），不改排序位。
+/// 修改已有卡片（标题 / URL / 描述 / 标签 / 分组 / 图标 / 格子尺寸 / 组件参数），
+/// 不改排序位与种类。
 #[server]
 pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFnError> {
     use crate::db;
 
     let row = clean_bookmark(&input).await.map_err(ServerFnError::new)?;
 
-    ensure_url_not_taken(db::pool(), id, &row.url)
-        .await
-        .map_err(ServerFnError::new)?;
+    // 网址查重只对书签有意义：组件的 url 是空串，且它的唯一性由 kind 去重保证
+    if row.kind.is_empty() {
+        ensure_url_not_taken(db::pool(), id, &row.url)
+            .await
+            .map_err(ServerFnError::new)?;
+    }
 
     let affected = sqlx::query(
         "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
-         icon = ?, span_w = ?, span_h = ? WHERE id = ?",
+         icon = ?, span_w = ?, span_h = ?, config = ? WHERE id = ?",
     )
     .bind(row.title)
     .bind(row.url)
@@ -357,14 +467,15 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
     .bind(row.icon)
     .bind(row.span_w)
     .bind(row.span_h)
+    .bind(row.config)
     .bind(id)
     .execute(db::pool())
     .await
-    .map_err(|e| ServerFnError::new(format!("修改书签失败: {e}")))?
+    .map_err(|e| ServerFnError::new(format!("修改卡片失败: {e}")))?
     .rows_affected();
 
     if affected == 0 {
-        return Err(ServerFnError::new("该书签已不存在"));
+        return Err(ServerFnError::new("该卡片已不存在"));
     }
 
     Ok(())
@@ -1079,7 +1190,9 @@ pub async fn export_bookmarks_json() -> String {
     use crate::db;
     use crate::models::ImportedBookmark;
 
-    let sql = build_search_sql(0);
+    // 只要书签：备份是拿去导入别的书签工具的，组件在那里没有对应物
+    // （`/export/db.sqlite` 那份完整快照才包含组件）。
+    let sql = build_search_sql(0, true);
 
     let rows = sqlx::query_as::<_, Bookmark>(sqlx::AssertSqlSafe(sql))
         .fetch_all(db::pool())
@@ -1127,7 +1240,9 @@ pub async fn export_bookmarks_html() -> String {
     use crate::db;
     use crate::transfer::ExportRow;
 
-    let sql = build_search_sql(0);
+    // 只要书签。这一份是给浏览器导入的，组件的 url 是空串，写出去就是一条
+    // 打不开的链接，会一直留在用户的书签栏里。
+    let sql = build_search_sql(0, true);
 
     let rows = sqlx::query_as::<_, Bookmark>(sqlx::AssertSqlSafe(sql))
         .fetch_all(db::pool())
@@ -1246,6 +1361,26 @@ pub async fn get_quote() -> Result<Quote, ServerFnError> {
     })
 }
 
+/// 查一次天气。同样由服务端代取：浏览器直连会被 CORS 挡，而且统一在服务端取
+/// 才能用上复用客户端 + 8 秒超时那一套（见 [`http_client`]）。
+///
+/// 与「一言」不同的是，**失败要说出原因**：一言取不到就保持空白无所谓，天气卡片空了
+/// 用户只会以为是坏的。所以这里的 Err 文案是要直接摆到卡片上的。
+///
+/// 地点是用户输入，但它只进查询参数（已百分号编码），目标地址是写死的——
+/// 不存在让对方指定请求地址那类问题，这一点与 [`suggest`] 的取舍一致。
+#[server]
+pub async fn get_weather(location: String, fahrenheit: bool) -> Result<Weather, ServerFnError> {
+    let location = crate::models::WeatherConfig::clean_location(&location);
+    if location.is_empty() {
+        return Err(ServerFnError::new("先填一个地点"));
+    }
+
+    crate::weather::fetch(&location, fahrenheit)
+        .await
+        .map_err(ServerFnError::new)
+}
+
 /// 搜索联想。由服务端代取引擎的联想接口（浏览器直连会被 CORS 挡）。
 ///
 /// 入参是**库里引擎的 id**，不是地址——服务端拿 id 反查 URL，再对照
@@ -1332,7 +1467,10 @@ mod tests {
                 deleted_at  TEXT,
                 -- 与迁移 004 一致：卡片跨几格，默认一格
                 span_w      INTEGER NOT NULL DEFAULT 1,
-                span_h      INTEGER NOT NULL DEFAULT 1
+                span_h      INTEGER NOT NULL DEFAULT 1,
+                -- 与迁移 005 一致：卡片种类与组件参数
+                kind        TEXT NOT NULL DEFAULT '',
+                config      TEXT NOT NULL DEFAULT ''
             )",
         )
         .execute(&pool)
@@ -1372,7 +1510,7 @@ mod tests {
     /// 复用与 `list_bookmarks` 完全相同的构造逻辑。
     async fn run(pool: &SqlitePool, query: &str) -> Vec<Bookmark> {
         let keywords: Vec<String> = query.split_whitespace().map(str::to_string).collect();
-        let sql = build_search_sql(keywords.len());
+        let sql = build_search_sql(keywords.len(), false);
         let mut q = sqlx::query_as::<_, Bookmark>(sqlx::AssertSqlSafe(sql));
         for keyword in &keywords {
             let pattern = like_pattern(keyword);
@@ -1504,6 +1642,24 @@ mod tests {
             icon: String::new(),
             span_w: 1,
             span_h: 1,
+            kind: crate::models::KIND_BOOKMARK.to_string(),
+            config: String::new(),
+        }
+    }
+
+    /// 一个最小可入库的组件行：没有网址，参数留空（等价于组件默认值）。
+    fn widget_row(kind: &str) -> CleanBookmark {
+        CleanBookmark {
+            title: crate::models::widget_label(kind).to_string(),
+            url: String::new(),
+            description: String::new(),
+            tags: String::new(),
+            group_id: None,
+            icon: String::new(),
+            span_w: 2,
+            span_h: 2,
+            kind: kind.to_string(),
+            config: String::new(),
         }
     }
 
@@ -1568,6 +1724,144 @@ mod tests {
         let all = run(&pool, "").await;
         let rust = all.iter().find(|b| b.title == "Rust 官网").expect("找到");
         assert_eq!((rust.span_w, rust.span_h), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn unknown_widget_kind_is_rejected() {
+        // 不在白名单里的类型直接拒收：放进去就等于让渲染层收到没见过的分支
+        let bad = NewBookmark {
+            title: "彩虹".to_string(),
+            kind: "rainbow".to_string(),
+            ..Default::default()
+        };
+        let err = clean_bookmark(&bad)
+            .await
+            .err()
+            .expect("未知类型应被拒收");
+        assert!(err.contains("不认识的卡片类型"), "实际：{err}");
+    }
+
+    /// 组件这条路不该碰数据库（它没有网址、不进分组），所以不需要连接池也能测。
+    #[tokio::test]
+    async fn widget_needs_no_url_and_gets_a_normalised_config() {
+        let clock = NewBookmark {
+            title: "数字时钟".to_string(),
+            kind: crate::models::KIND_CLOCK.to_string(),
+            // 多塞一个字段、少写一个字段：落库的应当是"这一版认识的字段 + 默认值"
+            config: r#"{"hour12":true,"junk":1}"#.to_string(),
+            span_w: 2,
+            span_h: 2,
+            ..Default::default()
+        };
+
+        let cleaned = clean_bookmark(&clock).await.expect("组件不需要数据库");
+        assert_eq!(cleaned.kind, crate::models::KIND_CLOCK);
+        assert_eq!(cleaned.url, "", "组件没有网址");
+        assert_eq!(cleaned.group_id, None, "组件不进分组");
+        assert_eq!(cleaned.tags, "");
+        assert_eq!((cleaned.span_w, cleaned.span_h), (2, 2));
+        assert_eq!(
+            crate::models::ClockConfig::parse(&cleaned.config),
+            crate::models::ClockConfig {
+                hour12: true,
+                show_seconds: true
+            },
+            "多余的字段被丢掉，缺的字段按默认补上"
+        );
+
+        // 书签那一侧照旧：没有合法网址一律拒绝
+        let bare = NewBookmark {
+            title: "没网址".to_string(),
+            ..Default::default()
+        };
+        assert!(clean_bookmark(&bare).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn note_text_is_capped_before_it_reaches_the_database() {
+        use crate::models::{NoteConfig, NOTE_MAX_CHARS};
+
+        // 内容是自由文本，一次粘贴就可能上千字，而它会跟着每次列表响应一起回去
+        let input = NewBookmark {
+            title: "记事本".to_string(),
+            kind: crate::models::KIND_NOTE.to_string(),
+            config: NoteConfig {
+                text: "字".repeat(NOTE_MAX_CHARS + 10),
+            }
+            .to_json(),
+            ..Default::default()
+        };
+
+        let cleaned = clean_bookmark(&input).await.expect("组件不需要数据库");
+        let saved = NoteConfig::parse(&cleaned.config);
+        assert_eq!(saved.text.chars().count(), NOTE_MAX_CHARS, "落库前已截断");
+        assert_eq!(cleaned.url, "", "记事本同样没有网址");
+        assert_eq!(cleaned.group_id, None);
+    }
+
+    #[tokio::test]
+    async fn second_widget_of_the_same_kind_is_not_inserted() {
+        let pool = seed().await;
+
+        let first = insert_new_bookmark(&pool, widget_row(crate::models::KIND_CLOCK))
+            .await
+            .expect("insert");
+        assert!(first.created);
+        assert_eq!(count(&pool).await, 5);
+
+        // 组件的 url 是空串，若沿用"按 url 去重"就会让这第二张被判成重复——
+        // 而它本来就是重复，只是判据该是 kind 而不是 url
+        let again = insert_new_bookmark(&pool, widget_row(crate::models::KIND_CLOCK))
+            .await
+            .expect("insert");
+        assert!(!again.created, "同一种组件只要一个");
+        assert_eq!(again.id, first.id);
+        assert_eq!(count(&pool).await, 5, "没有多写一张");
+
+        // 空网址不该让两张组件相互误判：另一个 kind 仍是独立的
+        let other = CleanBookmark {
+            kind: "chart".to_string(),
+            ..widget_row(crate::models::KIND_CLOCK)
+        };
+        // chart 不在白名单里，但去重这一层只认 kind，所以它照样能落库；
+        // 白名单由 clean_bookmark 把关（见上一个用例）
+        let other = insert_new_bookmark(&pool, other).await.expect("insert");
+        assert!(other.created, "不同 kind 互不干扰");
+        assert_eq!(count(&pool).await, 6);
+    }
+
+    #[tokio::test]
+    async fn widgets_stay_out_of_the_bookmark_export() {
+        let pool = seed().await;
+        insert_new_bookmark(&pool, widget_row(crate::models::KIND_CLOCK))
+            .await
+            .expect("insert");
+
+        // 列表两样都要取回来，前端才能把组件置顶、不参与筛选与分页
+        let all: Vec<Bookmark> =
+            sqlx::query_as::<_, Bookmark>(sqlx::AssertSqlSafe(build_search_sql(0, false)))
+                .fetch_all(&pool)
+                .await
+                .expect("query");
+        assert_eq!(all.len(), 5);
+        assert_eq!(all.iter().filter(|card| card.is_widget()).count(), 1);
+        // 组件也带得回参数列（FromRow 的列清单里得有 kind / config）
+        assert_eq!(
+            all.iter()
+                .find(|card| card.is_widget())
+                .map(|card| card.config.as_str()),
+            Some(""),
+            "没传参数时 config 是空串，由 ClockConfig::parse 回落默认值"
+        );
+
+        // 导出只要书签：组件的 url 是空串，写进书签文件就是一条打不开的链接
+        let exported: Vec<Bookmark> =
+            sqlx::query_as::<_, Bookmark>(sqlx::AssertSqlSafe(build_search_sql(0, true)))
+                .fetch_all(&pool)
+                .await
+                .expect("query");
+        assert_eq!(exported.len(), 4, "组件不出现在书签导出里");
+        assert!(exported.iter().all(|card| !card.is_widget()));
     }
 
     #[tokio::test]

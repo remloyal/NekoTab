@@ -143,7 +143,11 @@ pub fn TrashPanel(on_changed: EventHandler<()>) -> Element {
                         li { key: "{item.id}", class: "trash-row",
                             div { class: "trash-main",
                                 span { class: "trash-title", "{item.title}" }
-                                span { class: "trash-url", "{item.url}" }
+                                // 组件的 url 是空串（见 models::is_widget_kind），
+                                // 直接渲染会留一行空白，看起来像坏了
+                                span { class: "trash-url",
+                                    if item.url.is_empty() { "（组件）" } else { "{item.url}" }
+                                }
                                 span { class: "trash-time", "删除于 {item.deleted_at}（UTC）" }
                             }
                             div { class: "group-actions",

@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
-use super::icon_picker::IconPicker;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
+use crate::components::icon_picker::IconPicker;
 use crate::models::{
     clamp_span, AddOutcome, Bookmark, Group, NewBookmark, SPAN_MAX, SPAN_PRESETS,
 };
@@ -65,6 +65,10 @@ pub fn BookmarkForm(
             icon: icon(),
             span_w: span_w(),
             span_h: span_h(),
+            // 这个表单只管网址导航；组件走 WidgetForm
+            kind: crate::models::KIND_BOOKMARK.to_string(),
+            // 书签没有组件参数。update 的 SQL 里不写 kind，所以种类改不掉
+            config: String::new(),
         };
 
         spawn(async move {

@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use super::icon_tile::{hash_hue, icon_initial};
+use super::icons::{hash_hue, initial};
 use crate::models::Engine;
 
 /// 引擎图标：配了图片地址就用图片，否则用名称首字的彩色圆点（离线可用）。
@@ -16,12 +16,12 @@ pub(crate) fn engine_logo(engine: &Engine) -> Element {
         }
     } else {
         let hue = hash_hue(&engine.name);
-        let initial = icon_initial(&engine.name);
+        let letter = initial(&engine.name);
         rsx! {
             span {
                 class: "engine-logo engine-logo-text",
                 style: "background: hsl({hue} 62% 48%);",
-                "{initial}"
+                "{letter}"
             }
         }
     }

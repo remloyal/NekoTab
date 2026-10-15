@@ -1,24 +1,11 @@
 use dioxus::prelude::*;
 
+use super::widgets::{ClockWidget, DialWidget, NoteWidget, WeatherWidget};
 use crate::components::icons;
-use crate::models::Bookmark;
-
-/// 由字符串生成稳定的色相（FNV-1a 取模 360），供图标底色使用。
-pub(crate) fn hash_hue(input: &str) -> u32 {
-    let mut hash: u32 = 2_166_136_261;
-    for byte in input.bytes() {
-        hash = (hash ^ byte as u32).wrapping_mul(16_777_619);
-    }
-    hash % 360
-}
-
-/// 图标首字：取名称第一个字符并大写。
-pub(crate) fn icon_initial(name: &str) -> String {
-    name.chars()
-        .next()
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_else(|| "?".to_string())
-}
+use crate::models::{
+    Bookmark, ClockConfig, DialConfig, NoteConfig, WeatherConfig, KIND_CLOCK, KIND_DIAL,
+    KIND_NOTE, KIND_WEATHER,
+};
 
 /// 书签自定义图标的渲染。空串返回 `None`（表示走站点自动代取那条路）。
 fn custom_icon(icon: &str) -> Option<Element> {
@@ -34,7 +21,9 @@ fn custom_icon(icon: &str) -> Option<Element> {
 }
 
 fn icon_of(bookmark: &Bookmark) -> (String, u32) {
-    (icon_initial(&bookmark.title), hash_hue(&bookmark.url))
+    // 首字与稳定色相的算法在 icons 里：搜索引擎图标（engine_logo）用的是同一套回退，
+    // 不该让那个组件伸手进卡片文件来拿
+    (icons::initial(&bookmark.title), icons::hash_hue(&bookmark.url))
 }
 
 fn safe_href(url: &str) -> String {
@@ -52,18 +41,22 @@ const LONG_PRESS_MS: u32 = 500;
 /// 位移超过该像素数就当作"滑动"，不再算长按（或点击）。
 const MOVE_TOLERANCE: f64 = 8.0;
 
-/// 单个书签图标块。
+/// 单个卡片（书签或组件）。
 ///
 /// - 普通态：点击打开（新标签页或当前页，由设置决定），右键呼出菜单；
 /// - 编辑态：可拖拽排序（鼠标与触屏都走 Pointer Events），点击打开修改弹窗，
 ///   右上角 ✕ 删除；
 /// - 选择态：点击切换选中，配合底栏做批量删除 / 打标签 / 移动分组。
 ///
-/// 拖拽的判定与落点计算都在父级 `BookmarkGrid` 里：它同时是"网格内的公共祖先"，
+/// **书签与组件共用这一层**：跨度、容器查询、拖拽落点（`data-bookmark-id`）、
+/// 编辑态与选择态的角标，两者完全一样，只有"正文"和"点下去做什么"不同。所以这里是
+/// 一条正文分支，而不是两个几乎相同的卡片组件——那样每加一种交互都要改两遍。
+///
+/// 拖拽的判定与落点计算都在父级 `CardGrid` 里：它同时是"网格内的公共祖先"，
 /// 因此无论指针捕获成功与否，指针移动都能冒泡到它。这里只负责按下时把坐标报上去。
 #[component]
 #[allow(clippy::too_many_arguments)]
-pub fn IconTile(
+pub fn CardTile(
     bookmark: Bookmark,
     /// 横向占几格（已按当前可用列数夹过）
     span_w: i64,
@@ -89,10 +82,14 @@ pub fn IconTile(
     on_pointer_down: EventHandler<(f64, f64)>,
 ) -> Element {
     let (initial, hue) = icon_of(&bookmark);
-    let tooltip = if bookmark.description.is_empty() {
-        bookmark.url.clone()
-    } else {
+    let is_widget = bookmark.is_widget();
+    // 组件的 url 是空串，拿它当提示等于没有提示，所以退回名称
+    let tooltip = if !bookmark.description.is_empty() {
         bookmark.description.clone()
+    } else if is_widget {
+        bookmark.title.clone()
+    } else {
+        bookmark.url.clone()
     };
     let id = bookmark.id;
 
@@ -109,8 +106,35 @@ pub fn IconTile(
 
     let is_edit = editing && !selecting;
 
+    // 组件正文：按 kind 分发。加新组件时这里加一条分支。
+    let widget_body: Option<Element> = is_widget.then(|| match bookmark.kind.as_str() {
+        KIND_CLOCK => rsx! {
+            ClockWidget { config: ClockConfig::parse(&bookmark.config) }
+        },
+        KIND_DIAL => rsx! {
+            DialWidget { config: DialConfig::parse(&bookmark.config) }
+        },
+        KIND_NOTE => rsx! {
+            NoteWidget { config: NoteConfig::parse(&bookmark.config) }
+        },
+        KIND_WEATHER => rsx! {
+            WeatherWidget {
+                // 取数是跟着参数走的：改了地点若不重挂，`use_future` 会一直用挂载时
+                // 捕获的那个地点，卡片就停在旧城市上。key 一变就重挂，等于重新取。
+                key: "{bookmark.config}",
+                config: WeatherConfig::parse(&bookmark.config),
+            }
+        },
+        // 未知 kind 理论上进不来（服务端有白名单）。真出现了就不画正文，
+        // 但保留卡片本身——至少还能右键把它删掉，而不是凭空少一块。
+        _ => rsx! {},
+    });
+
     let class = {
         let mut class = String::from("tile");
+        if is_widget {
+            class.push_str(" tile-widget");
+        }
         if selected {
             class.push_str(" tile-selected");
         }
@@ -217,6 +241,16 @@ pub fn IconTile(
                         evt.prevent_default();
                         evt.stop_propagation();
                         on_edit.call(target.clone());
+                        return;
+                    }
+
+                    // 普通态的组件：没有可去的地方（url 是空串），点它改为打开设置。
+                    // 记事本的正文就在设置里改，点一下就能写——否则还得右键找菜单。
+                    // 必须 prevent_default，否则会去走 <a href="#">，把页面滚回顶部。
+                    if target.is_widget() {
+                        evt.prevent_default();
+                        evt.stop_propagation();
+                        on_edit.call(target.clone());
                     }
                 }
             },
@@ -244,28 +278,32 @@ pub fn IconTile(
                 span { class: "tile-grip", title: "按住拖动调整位置", "⠿" }
             }
 
-            div {
-                class: "tile-icon",
-                style: "background: linear-gradient(140deg, hsl({hue} 62% 54%), hsl({(hue + 30) % 360} 60% 42%));",
-                span { class: "tile-letter", "{initial}" }
-                if let Some(icon) = custom {
-                    {icon}
-                } else if let Some(host) = icon_host.clone() {
-                    // 取到站点图标就盖在首字色块之上；404 时藏掉它，露出首字。
-                    // 但在 onerror 挂上之前就失败的（SSR 那批），这里收不到通知，
-                    // 由 BookmarkGrid 挂载后补查一次补齐，见 dom::mark_broken_favicons。
-                    if !icon_failed() {
-                        img {
-                            class: "tile-favicon",
-                            src: "/icon/{host}",
-                            alt: "",
-                            loading: "lazy",
-                            onerror: move |_| icon_failed.set(true),
+            if let Some(body) = widget_body {
+                {body}
+            } else {
+                div {
+                    class: "tile-icon",
+                    style: "background: linear-gradient(140deg, hsl({hue} 62% 54%), hsl({(hue + 30) % 360} 60% 42%));",
+                    span { class: "tile-letter", "{initial}" }
+                    if let Some(icon) = custom {
+                        {icon}
+                    } else if let Some(host) = icon_host.clone() {
+                        // 取到站点图标就盖在首字色块之上；404 时藏掉它，露出首字。
+                        // 但在 onerror 挂上之前就失败的（SSR 那批），这里收不到通知，
+                        // 由 CardGrid 挂载后补查一次补齐，见 dom::mark_broken_favicons。
+                        if !icon_failed() {
+                            img {
+                                class: "tile-favicon",
+                                src: "/icon/{host}",
+                                alt: "",
+                                loading: "lazy",
+                                onerror: move |_| icon_failed.set(true),
+                            }
                         }
                     }
                 }
+                div { class: "tile-label", "{bookmark.title}" }
             }
-            div { class: "tile-label", "{bookmark.title}" }
         }
     }
 }

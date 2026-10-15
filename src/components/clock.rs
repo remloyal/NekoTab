@@ -1,9 +1,8 @@
 use dioxus::prelude::*;
 
+// 只在客户端的刷新循环里用到（"现在几点"服务端不知道）
 #[cfg(feature = "web")]
-const WEEKDAYS: [&str; 7] = [
-    "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六",
-];
+use crate::timefmt::{format_clock, weekday_name};
 
 /// 首页大时钟。
 ///
@@ -33,29 +32,11 @@ pub fn Clock(show_lunar: bool, show_day: bool, hour12: bool, show_seconds: bool)
             let minutes = now.get_minutes();
             let seconds = now.get_seconds();
 
-            // 12 小时制里 0 点要显示成 12 点；「上午 / 下午」放在最前面，
-            // 中文界面下比尾随的 AM/PM 顺眼
-            let clock = if hour12 {
-                let hour = match hours % 12 {
-                    0 => 12,
-                    h => h,
-                };
-                let half = if hours < 12 { "上午" } else { "下午" };
-                if show_seconds {
-                    format!("{half} {hour:02}:{minutes:02}:{seconds:02}")
-                } else {
-                    format!("{half} {hour:02}:{minutes:02}")
-                }
-            } else if show_seconds {
-                format!("{hours:02}:{minutes:02}:{seconds:02}")
-            } else {
-                format!("{hours:02}:{minutes:02}")
-            };
-            time.set(clock);
+            time.set(format_clock(hours, minutes, seconds, hour12, show_seconds));
 
             date.set(format!(
                 "{year}年{month}月{day}日 {}",
-                WEEKDAYS[now.get_day() as usize]
+                weekday_name(now.get_day())
             ));
 
             // 农历与"第几天/第几周"按需拼接，都是纯计算，不额外发请求

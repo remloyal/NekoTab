@@ -27,7 +27,7 @@ pub fn Pager(
                 class: "pager-btn",
                 r#type: "button",
                 title: "上一页",
-                // 拖拽卡片到这个按钮上会翻页（跨页拖拽），见 BookmarkGrid
+                // 拖拽卡片到这个按钮上会翻页（跨页拖拽），见 CardGrid
                 "data-page-flip": "prev",
                 onclick: move |_| on_jump.call(page.saturating_sub(1)),
                 "‹"

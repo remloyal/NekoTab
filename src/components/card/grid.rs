@@ -1,19 +1,22 @@
 use dioxus::prelude::*;
 
-use crate::components::IconTile;
+use super::tile::CardTile;
 use crate::models::Bookmark;
 
 /// 位移超过该像素数才算"开始拖动"（用来区分点击与拖拽）。
 const DRAG_TOLERANCE: f64 = 8.0;
 
-/// 图标网格。末尾固定一个「添加卡片」块。
+/// 卡片网格。末尾固定一个「添加卡片」块。
 ///
 /// 拖拽状态与判定都留在这里：网格是"所有卡片的公共祖先"，所以指针移动——无论
 /// 指针捕获成功还是失败——都会冒泡到它。对外只暴露「把 A 放到 B 的位置」这一个
 /// 事件，调用方不必关心中间的指针细节。鼠标与触屏走同一条路径（Pointer Events）。
+///
+/// 收到的 `Vec<Bookmark>` 里书签与组件都有（靠 `kind` 分），网格本身不关心区别：
+/// 跨度、落点、拖拽对两者是一样的。
 #[component]
 #[allow(clippy::too_many_arguments)]
-pub fn BookmarkGrid(
+pub fn CardGrid(
     items: Vec<Bookmark>,
     /// 容器当前能排出的列数（`None` = 还没量到，不夹取跨度）。
     /// 跨格卡片的宽度会被收到这个数以内，见 `models::clamp_span_w`。
@@ -135,7 +138,7 @@ pub fn BookmarkGrid(
             },
 
             for item in items {
-                IconTile {
+                CardTile {
                     key: "{item.id}",
                     bookmark: item.clone(),
                     // 宽度按可用列数夹取；高度不受列数影响

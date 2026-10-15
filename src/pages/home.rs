@@ -7,23 +7,47 @@ use crate::backend::{
     list_groups, move_bookmarks, reorder_bookmarks, set_active_engine,
 };
 use crate::components::{
-    build_tabs, group_value, parse_filter, BatchMoveList, BookmarkForm, BookmarkGrid,
-    Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs, Modal, Pager,
-    QuoteLine, SearchBar, SearchMode, SettingsPanel, GROUP_UNGROUPED, SEARCH_INPUT_ID,
+    build_tabs, group_value, parse_filter, AddCardDialog, AddTab, BatchMoveList, BookmarkForm,
+    CardGrid, Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs,
+    Modal, Pager, QuoteLine, SearchBar, SearchMode, SettingsPanel, WidgetForm, GROUP_UNGROUPED,
+    SEARCH_INPUT_ID,
 };
-use crate::models::{Bookmark, Group, Settings};
+use crate::models::{widget_label, Bookmark, Group, Settings};
 use dioxus::html::geometry::WheelDelta;
 
 /// 弹窗状态机。
 #[derive(Clone, PartialEq)]
 enum ModalState {
     None,
-    Add,
+    /// 「添加卡片」弹窗。`tab` 是打开时停在的标签页，`kind` 是已经选好的组件类型
+    /// （从右键菜单直接点某个组件进来时带着）。书签与组件共用这一个弹窗，入口因此
+    /// 只剩一处——原来「加书签」和「加组件」是两条独立的路径。
+    AddCard { tab: AddTab, kind: Option<String> },
     Edit { bookmark: Bookmark },
     EngineSettings,
     /// 删除确认。单条与批量共用：`ids` 是要删的集合，`message` 是文案。
     ConfirmDelete { ids: Vec<i64>, message: String },
     BatchMove,
+}
+
+/// 把卡片分成「组件」与「书签」两组，各自保持原有顺序。
+///
+/// 分流只做一次，下面是两条不同的路：书签照旧走关键词 → 分组 → 分页；组件直接
+/// 拼回显示列表的最前面，**不参与**这三步——组件是"少、固定、一眼要看到"的东西，
+/// 被搜索筛掉或翻到第二页都只会让版面突然缺一块。
+fn split_cards(cards: &[Bookmark]) -> (Vec<Bookmark>, Vec<Bookmark>) {
+    let mut widgets = Vec::new();
+    let mut bookmarks = Vec::new();
+
+    for card in cards {
+        if card.is_widget() {
+            widgets.push(card.clone());
+        } else {
+            bookmarks.push(card.clone());
+        }
+    }
+
+    (widgets, bookmarks)
 }
 
 /// 把 `dragged` 挪到 `target` 的位置（在传进来的完整顺序上做）。
@@ -192,7 +216,13 @@ pub fn Home() -> Element {
         Some(Ok(items)) => items.clone(),
         _ => Vec::new(),
     };
-    let total = all_items.len();
+
+    // ---- 组件 / 书签分流 ----
+    // 分流在最前面做，于是下面整条"关键词 → 分组 → 分页"的管线只跑书签，
+    // 组件在最后拼回显示列表的最前面（见下方 `view`）。
+    let (widgets, bookmarks) = split_cards(&all_items);
+    // 分组条数与"还没有书签"的空态提示都只看书签：有组件不等于有书签
+    let total = bookmarks.len();
 
     // ---- 筛选 ----
     let known_group_ids: HashSet<i64> = groups.iter().map(|group| group.id).collect();
@@ -203,7 +233,7 @@ pub fn Home() -> Element {
         String::new()
     };
 
-    let keyword_matched: Vec<Bookmark> = all_items
+    let keyword_matched: Vec<Bookmark> = bookmarks
         .iter()
         .filter(|item| matches_keyword(item, &keyword))
         .cloned()
@@ -232,7 +262,7 @@ pub fn Home() -> Element {
         })
         .collect();
 
-    // ---- 分页 ----
+    // ---- 分页（只对书签） ----
     let page_size = settings.page_size.max(0) as usize;
     let page_count = if page_size == 0 {
         1
@@ -240,13 +270,22 @@ pub fn Home() -> Element {
         matched.len().div_ceil(page_size).max(1)
     };
     let current_page = page().min(page_count - 1);
-    let view: Vec<Bookmark> = if page_size == 0 {
+    let page_of_bookmarks: Vec<Bookmark> = if page_size == 0 {
         matched.clone()
     } else {
         let start = current_page * page_size;
         let end = (start + page_size).min(matched.len());
         matched[start..end].to_vec()
     };
+
+    // 显示列表 = 组件（按它们自己的顺序）++ 本页书签。
+    // 组件与书签的 sort_order 共用一列，但显示时按 kind 分两段，所以两边互不干扰：
+    // 拖拽也只在同类之间生效（见 on_reorder），于是这一段始终是稳定的前缀。
+    let view: Vec<Bookmark> = widgets
+        .iter()
+        .cloned()
+        .chain(page_of_bookmarks)
+        .collect();
 
     let is_editing = editing();
     let is_selecting = selecting();
@@ -370,13 +409,28 @@ pub fn Home() -> Element {
 
     // ---- 拖拽落位 ----
     //
-    // 落位语义是「把被拖的这条挪到目标那条的位置」，在全量顺序上做，因此
+    // 落位语义是「把被拖的这条挪到目标那条的位置」，在**全量顺序**上做，因此
     // **跨页拖拽也成立**（分页只影响显示，order_ids 始终是全量）。
     // 早先用的是"在视图内置换"的合并写法，视图外的位置不动；那个写法在跨页时
     // 会直接失效——被拖的条目不在新页的视图集合里，校验不过就整单放弃。
-    let full_ids: Vec<i64> = all_items.iter().map(|item| item.id).collect();
+    //
+    // 这里的"全量顺序"取的是**显示顺序**（组件在前、随后是全部书签），而不是服务端
+    // 返回的原始行序：两者在首次重排之前可能不一致，用显示顺序算落位才不会出现
+    // "看到的顺序"和"算出来的顺序"错位。
+    let full_ids: Vec<i64> = widgets
+        .iter()
+        .chain(bookmarks.iter())
+        .map(|card| card.id)
+        .collect();
+    let widget_ids: HashSet<i64> = widgets.iter().map(|card| card.id).collect();
     let on_reorder = move |(dragged, target): (i64, i64)| {
         if dragged == target {
+            return;
+        }
+
+        // 只认同类落位：组件固定在书签之前，把书签拖进组件区（或反过来）没有可解释
+        // 的结果——显示列表始终按 kind 分两段，落了位也看不出变化，只会白白改一遍顺序。
+        if widget_ids.contains(&dragged) != widget_ids.contains(&target) {
             return;
         }
 
@@ -664,14 +718,19 @@ pub fn Home() -> Element {
                                 }
                             }
                         }
-                        BookmarkGrid {
+                        CardGrid {
                             items: view.clone(),
                             columns: grid_columns,
                             editing: is_editing,
                             selecting: is_selecting,
                             selected: selected_ids.clone(),
                             new_tab: settings.open_in_new_tab,
-                            on_add: move |_| modal.set(ModalState::Add),
+                            on_add: move |_| {
+                                modal.set(ModalState::AddCard {
+                                    tab: AddTab::Bookmark,
+                                    kind: None,
+                                })
+                            },
                             on_context: move |(bookmark, x, y): (Bookmark, f64, f64)| {
                                 menu.set(Some((x, y, Some(bookmark))));
                             },
@@ -806,7 +865,19 @@ pub fn Home() -> Element {
                     },
                     on_add: move |_| {
                         menu.set(None);
-                        modal.set(ModalState::Add);
+                        modal.set(ModalState::AddCard {
+                            tab: AddTab::Bookmark,
+                            kind: None,
+                        });
+                    },
+                    on_add_widget: move |kind: String| {
+                        menu.set(None);
+                        // 菜单是快捷方式：直接停到该组件的参数表单上，
+                        // 而不是让用户再在弹窗里点一次
+                        modal.set(ModalState::AddCard {
+                            tab: AddTab::Widget,
+                            kind: Some(kind),
+                        });
                     },
                     on_edit: move |bookmark: Bookmark| {
                         menu.set(None);
@@ -863,19 +934,21 @@ pub fn Home() -> Element {
             }
 
             match modal() {
-                ModalState::Add => rsx! {
+                ModalState::AddCard { tab, kind } => rsx! {
                     Modal {
-                        title: "添加网址导航",
+                        title: "添加卡片",
                         on_close: move |_| modal.set(ModalState::None),
-                        BookmarkForm {
-                            bookmark: None,
+                        AddCardDialog {
+                            initial_tab: tab,
+                            initial_kind: kind,
                             groups: groups.clone(),
                             // 当前就停在某个分组下时，默认归到那一组
                             default_group: match filter {
                                 Filter::Group(id) => Some(id),
                                 _ => None,
                             },
-                            on_cancel: move |_| modal.set(ModalState::None),
+                            existing_widgets: widgets.clone(),
+                            on_close: move |_| modal.set(ModalState::None),
                             on_saved: move |_| {
                                 modal.set(ModalState::None);
                                 refresh.set(refresh() + 1);
@@ -884,25 +957,50 @@ pub fn Home() -> Element {
                         }
                     }
                 },
-                ModalState::Edit { bookmark } => rsx! {
-                    Modal {
-                        title: "修改网址导航",
-                        on_close: move |_| modal.set(ModalState::None),
-                        BookmarkForm {
-                            // key 让切换不同书签时重新挂载，避免沿用上一个的预填值
-                            key: "{bookmark.id}",
-                            bookmark: Some(bookmark.clone()),
-                            groups: groups.clone(),
-                            default_group: None,
-                            on_cancel: move |_| modal.set(ModalState::None),
-                            on_saved: move |_| {
-                                modal.set(ModalState::None);
-                                refresh.set(refresh() + 1);
-                                groups_refresh.set(groups_refresh() + 1);
-                            },
+                ModalState::Edit { bookmark } => {
+                    // 编辑入口是共用的（点卡片、右键菜单），但表单要按种类分：
+                    // 组件没有网址、描述、分组、图标那些字段
+                    let is_widget = bookmark.is_widget();
+                    let card = bookmark.clone();
+                    let title = if is_widget {
+                        format!("设置{}", widget_label(&card.kind))
+                    } else {
+                        "修改网址导航".to_string()
+                    };
+
+                    rsx! {
+                        Modal {
+                            title,
+                            on_close: move |_| modal.set(ModalState::None),
+                            if is_widget {
+                                WidgetForm {
+                                    // key 让切换不同卡片时重新挂载，避免沿用上一个的预填值
+                                    key: "{card.id}",
+                                    card: Some(card.clone()),
+                                    kind: card.kind.clone(),
+                                    on_cancel: move |_| modal.set(ModalState::None),
+                                    on_saved: move |_| {
+                                        modal.set(ModalState::None);
+                                        refresh.set(refresh() + 1);
+                                    },
+                                }
+                            } else {
+                                BookmarkForm {
+                                    key: "{card.id}",
+                                    bookmark: Some(card.clone()),
+                                    groups: groups.clone(),
+                                    default_group: None,
+                                    on_cancel: move |_| modal.set(ModalState::None),
+                                    on_saved: move |_| {
+                                        modal.set(ModalState::None);
+                                        refresh.set(refresh() + 1);
+                                        groups_refresh.set(groups_refresh() + 1);
+                                    },
+                                }
+                            }
                         }
                     }
-                },
+                }
                 ModalState::EngineSettings => rsx! {
                     Modal {
                         title: "搜索引擎设置",
@@ -985,6 +1083,9 @@ mod tests {
             created_at: String::new(),
             span_w: 1,
             span_h: 1,
+            // 这些用例只管书签；组件的分流另有专门用例
+            kind: crate::models::KIND_BOOKMARK.to_string(),
+            config: String::new(),
         }
     }
 
@@ -1091,5 +1192,50 @@ mod tests {
         assert_eq!(moved, vec![1, 3, 4, 5, 6, 2, 7, 8]);
         // 第 2 页（下标 4..8）现在以 2 开头，说明确实跨过去了
         assert_eq!(&moved[4..8], &[6, 2, 7, 8]);
+    }
+
+    fn widget(id: i64, kind: &str) -> Bookmark {
+        Bookmark {
+            kind: kind.to_string(),
+            ..bookmark(id, crate::models::widget_label(kind), "", "", "")
+        }
+    }
+
+    /// 分流只按"是不是组件"分开，不重排——两组的相对顺序都要保持原样，
+    /// 否则页面上卡片的顺序会莫名其妙地变。
+    #[test]
+    fn split_keeps_each_group_in_its_original_order() {
+        let cards = vec![
+            bookmark(1, "A", "https://a.com", "", ""),
+            widget(2, crate::models::KIND_CLOCK),
+            bookmark(3, "B", "https://b.com", "", ""),
+            widget(4, crate::models::KIND_CLOCK),
+        ];
+
+        let (widgets, bookmarks) = split_cards(&cards);
+        assert_eq!(widgets.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2, 4]);
+        assert_eq!(bookmarks.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    /// 分流决定"页面上会出现什么"，所以不能丢卡片、也不能重复。
+    #[test]
+    fn split_loses_nothing() {
+        let cards = vec![
+            bookmark(1, "A", "https://a.com", "", ""),
+            widget(2, crate::models::KIND_CLOCK),
+        ];
+
+        let (widgets, bookmarks) = split_cards(&cards);
+        assert_eq!(widgets.len() + bookmarks.len(), cards.len());
+    }
+
+    /// 白名单外的 kind 按书签处理：渲染层因此不会碰到没见过的组件分支。
+    #[test]
+    fn unknown_kind_is_not_treated_as_a_widget() {
+        let cards = vec![widget(7, "chart")];
+
+        let (widgets, bookmarks) = split_cards(&cards);
+        assert!(widgets.is_empty(), "白名单外的类型不算组件");
+        assert_eq!(bookmarks.len(), 1, "它退回书签那一侧");
     }
 }
