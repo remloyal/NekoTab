@@ -1086,6 +1086,7 @@ mod tests {
             // 这些用例只管书签；组件的分流另有专门用例
             kind: crate::models::KIND_BOOKMARK.to_string(),
             config: String::new(),
+            surface: String::new(),
         }
     }
 

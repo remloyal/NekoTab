@@ -33,6 +33,9 @@ pub struct Bookmark {
     /// 组件的显示参数（JSON 串）。书签恒为空串。见 [`ClockConfig`]。
     #[serde(default)]
     pub config: String,
+    /// 卡片的面（底色）。空串＝没设过，用该种类的默认；见 [`effective_surface`]。
+    #[serde(default)]
+    pub surface: String,
 }
 
 /// 卡片种类：网址导航（书签）。空串是它的取值，于是"老数据 / 没传"天然落在书签上。
@@ -76,6 +79,48 @@ pub fn widget_label(kind: &str) -> &'static str {
         .find(|(known, _, _)| *known == kind)
         .map(|(_, label, _)| *label)
         .unwrap_or("")
+}
+
+/// 卡片的面（底色）：`(id, 显示名)`。**与 kind 无关**——书签卡将来也能用。
+///
+/// 空串不是"没有面"，而是"没设过，用该种类的默认"（见 [`effective_surface`]）。
+/// 这样以后想改默认值，已有的卡片会一起跟上，不必写迁移回填。
+pub const CARD_SURFACES: [(&str, &str); 4] =
+    [("", "默认"), ("none", "无"), ("panel", "半透明"), ("solid", "实底")];
+
+/// 没设过面时的默认：**组件卡要一层**（它的内容是文字与细线，压在壁纸上能不能看清
+/// 全看壁纸是什么样），**书签卡不要**（内容是"彩色图标块 + 一行短标题"，图标块自带底色）。
+pub fn default_surface(is_widget: bool) -> &'static str {
+    if is_widget {
+        "panel"
+    } else {
+        "none"
+    }
+}
+
+/// 把库里存的面收敛到白名单；认不出的一律当成"没设过"。
+///
+/// 只有服务端落库前调它（表单那边给的是白名单里的固定几项），所以 web 侧编译时是死代码。
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub fn normalize_surface(value: &str) -> String {
+    let value = value.trim();
+    CARD_SURFACES
+        .iter()
+        .any(|(id, _)| !id.is_empty() && *id == value)
+        .then(|| value.to_string())
+        .unwrap_or_default()
+}
+
+/// 卡片实际用的面：把"没设过"解析成该种类的默认。
+///
+/// 返回值一定落在 [`CARD_SURFACES`] 的 id 里，渲染时直接当属性值用。
+pub fn effective_surface(surface: &str, is_widget: bool) -> &'static str {
+    let value = surface.trim();
+    CARD_SURFACES
+        .iter()
+        .find(|(id, _)| !id.is_empty() && *id == value)
+        .map(|(id, _)| *id)
+        .unwrap_or_else(|| default_surface(is_widget))
 }
 
 /// 「数字时钟」组件的显示参数。
@@ -310,12 +355,22 @@ pub struct NewBookmark {
     /// 组件参数（JSON 串）；书签留空。服务端会按 kind 规范化后再落库。
     #[serde(default)]
     pub config: String,
+    /// 卡片的面（底色）；留空表示用该种类的默认，见 [`effective_surface`]。
+    #[serde(default)]
+    pub surface: String,
 }
 
 impl Bookmark {
     /// 这张卡片是不是组件。未知 kind 按书签处理——渲染层因此不会碰到没见过的分支。
     pub fn is_widget(&self) -> bool {
         is_widget_kind(&self.kind)
+    }
+
+    /// 这张卡片实际该用的面：把"没设过"解析成该种类的默认。
+    ///
+    /// 渲染层只调这一个方法，不必自己判断 kind 或处理空串。
+    pub fn surface_class(&self) -> &'static str {
+        effective_surface(&self.surface, self.is_widget())
     }
 }
 
@@ -1049,6 +1104,69 @@ mod tests {
         let cleaned = NoteConfig::clean(&long);
         assert_eq!(cleaned.chars().count(), NOTE_MAX_CHARS);
         assert!(cleaned.chars().all(|character| character == '字'));
+    }
+
+    #[test]
+    fn card_surface_defaults_are_kind_dependent() {
+        // 没设过（空串）时：组件卡有面、书签卡没有。这条是"迁移零行为变化"的依据——
+        // 既有书签的 surface 都是空串，解析出来必须是"无面"。
+        assert_eq!(effective_surface("", false), "none", "书签卡默认不要面");
+        assert_eq!(effective_surface("", true), "panel", "组件卡默认要一层");
+
+        // 明确设过的照用，不管是什么种类
+        assert_eq!(effective_surface("solid", false), "solid");
+        assert_eq!(effective_surface("none", true), "none");
+        assert_eq!(effective_surface("panel", true), "panel");
+
+        // 认不出的值当成"没设过"，回落该种类的默认，而不是把乱码当类名用
+        assert_eq!(effective_surface("rainbow", false), "none");
+        assert_eq!(effective_surface("rainbow", true), "panel");
+    }
+
+    #[test]
+    fn card_surface_whitelist_round_trips() {
+        for (id, label) in CARD_SURFACES {
+            assert!(!label.is_empty(), "{id} 没有显示名");
+            assert_eq!(normalize_surface(id), id, "{id} 应原样保留");
+        }
+
+        // 空串、乱码、大小写不同的一律收敛成空串（＝没设过）
+        for junk in ["", "  ", "PANEEL", "PANEL", "Default", "面板"] {
+            assert_eq!(normalize_surface(junk), "", "应把 {junk:?} 收敛成没设过");
+        }
+
+        // 白名单里的值都能"原样往返"：规范化再解析，结果不变
+        for id in ["none", "panel", "solid"] {
+            assert_eq!(normalize_surface(id), id);
+            assert_eq!(effective_surface(&normalize_surface(id), true), id);
+        }
+    }
+
+    #[test]
+    fn bookmark_surface_class_uses_its_kind() {
+        let mut card = Bookmark {
+            id: 1,
+            title: "A".to_string(),
+            url: "https://a.com".to_string(),
+            description: String::new(),
+            tags: String::new(),
+            group_id: None,
+            icon: String::new(),
+            created_at: String::new(),
+            span_w: 1,
+            span_h: 1,
+            kind: KIND_BOOKMARK.to_string(),
+            config: String::new(),
+            surface: String::new(),
+        };
+
+        assert_eq!(card.surface_class(), "none", "书签卡不设面时是透明的");
+
+        card.kind = KIND_NOTE.to_string();
+        assert_eq!(card.surface_class(), "panel", "换成组件就自动有面");
+
+        card.surface = "solid".to_string();
+        assert_eq!(card.surface_class(), "solid", "明确设过的压过默认");
     }
 
     #[test]

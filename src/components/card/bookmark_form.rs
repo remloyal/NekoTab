@@ -36,6 +36,12 @@ pub fn BookmarkForm(
     // 标签不再是界面上的东西（分类只由分组承担），但库里已有的值要原样带过去：
     // update 会整行覆盖，这里若不回传就等于把老数据清空了。
     let existing_tags = existing.as_ref().map(|b| b.tags.clone()).unwrap_or_default();
+    // 底色同理。书签卡现在没有底色可选（第一期只给组件卡），但 update 整行覆盖，
+    // 不回传就会把这个字段清掉——将来书签也能选面时，这就是一处会丢数据的地方。
+    let existing_surface = existing
+        .as_ref()
+        .map(|b| b.surface.clone())
+        .unwrap_or_default();
     // 下拉框的值统一用字符串：空串即"未分组"，这样 select 的 value 不必处理 Option
     let mut group_id = use_signal(|| {
         existing
@@ -69,6 +75,7 @@ pub fn BookmarkForm(
             kind: crate::models::KIND_BOOKMARK.to_string(),
             // 书签没有组件参数。update 的 SQL 里不写 kind，所以种类改不掉
             config: String::new(),
+            surface: existing_surface.clone(),
         };
 
         spawn(async move {

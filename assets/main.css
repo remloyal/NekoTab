@@ -22,6 +22,11 @@
     --scrollbar-thumb: rgba(255, 255, 255, 0.26);
     --scrollbar-thumb-hover: rgba(255, 255, 255, 0.44);
 
+    /* 卡片的面（data-surface）。半透明那一档刻意比 --panel 更透，
+       好让壁纸从卡片里透出来；描边用来在浅色壁纸上收边。 */
+    --card-panel: rgba(24, 28, 38, 0.62);
+    --card-line: rgba(255, 255, 255, 0.1);
+
     /* 由 home.rs 按设置覆盖：卡片尺寸、间距、列模板、每行最大列数换算的宽度上限 */
     --tile-size: 96px;
     --tile-gap-x: 8px;
@@ -52,6 +57,9 @@
 
     --scrollbar-thumb: rgba(20, 30, 50, 0.26);
     --scrollbar-thumb-hover: rgba(20, 30, 50, 0.44);
+
+    --card-panel: rgba(255, 255, 255, 0.66);
+    --card-line: rgba(20, 30, 50, 0.1);
 }
 
 * {
@@ -933,12 +941,50 @@ body {
     box-shadow: none;
 }
 
+/* ---------- 卡片的面 ---------- */
+/* 内容类组件的文字与细线压在壁纸上能不能看清，全看壁纸是什么样，所以默认给一层底。
+   书签卡不需要：它的内容是"彩色图标块 + 一行短标题"，图标块自带底色与投影，
+   所以默认仍是透明的（与各家新标签页的做法一致）。
+   取值由 models::effective_surface 决定，落到 .tile 的 data-surface 上。
+
+   底色与前景是**成套**的：这里只改 --card-panel / --panel-solid 这些底色，
+   字色仍是 --text——而这两个变量本来就随主题成对切换（深色主题深底浅字、
+   浅色主题白底深字），所以不必再为"面"造一套前景变量。 */
+.tile[data-surface="panel"] {
+    background: var(--card-panel);
+    border: 1px solid var(--card-line);
+    backdrop-filter: blur(10px);
+}
+
+.tile[data-surface="solid"] {
+    background: var(--panel-solid);
+    border: 1px solid var(--card-line);
+}
+
+/* 有面时表盘不必再自带底盘——那层是为"没有面"准备的，留着会叠成两层 */
+.tile[data-surface="panel"] .dial-face,
+.tile[data-surface="solid"] .dial-face {
+    fill: none;
+}
+
+/* 有面的卡片不能沿用 .tile:hover 的纯色背景：那会按 6% 的亮色把整个面刷掉。
+   改成"面不变、描边点亮"。 */
+.tile[data-surface="panel"]:hover {
+    background: var(--card-panel);
+    border-color: var(--accent);
+}
+
+.tile[data-surface="solid"]:hover {
+    background: var(--panel-solid);
+    border-color: var(--accent);
+}
+
 /* ---------- 组件卡片 ---------- */
 /* 组件和书签共用 .tile 这一层——跨度、容器查询、hover、编辑态与选择态的角标
    全都要，所以这里只改"正文怎么排"，不重写卡片本身。 */
 .tile-widget {
     padding: 10px;
-    gap: 0;
+    gap: 5px;
 }
 
 /* 普通态的组件没有可去的地方（url 是空串），别给出手指光标 */
@@ -953,7 +999,11 @@ body {
     justify-content: center;
     gap: calc(100cqh * 0.04);
     width: 100%;
-    height: 100%;
+    /* 占满除名字之外的剩余高度（名字那行在 .tile-label 里）。
+       用 flex:1 而不是 height:100%——后者会把名字顶出卡片。
+       min-height:0 才允许它被压到比内容更小，否则名字会被挤出去。 */
+    flex: 1;
+    min-height: 0;
     color: var(--text);
     /* 裁在自己的格子里。行高是固定的（--tile-row 配跨度），内容一旦溢出就会盖住
        相邻卡片，而"盖住别人"比"自己少显示一点"难查得多。 */

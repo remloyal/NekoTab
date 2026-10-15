@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
 use crate::models::{
     clamp_span, widget_label, AddOutcome, Bookmark, ClockConfig, DialConfig, NewBookmark,
-    NoteConfig, WeatherConfig, KIND_CLOCK, KIND_DIAL, KIND_NOTE, KIND_WEATHER,
+    NoteConfig, WeatherConfig, CARD_SURFACES, KIND_CLOCK, KIND_DIAL, KIND_NOTE, KIND_WEATHER,
     NOTE_MAX_CHARS, SPAN_MAX, SPAN_PRESETS, WEATHER_MAX_LOCATION_CHARS,
 };
 
@@ -65,6 +65,14 @@ pub fn WidgetForm(
     // 组件默认占 2×2：它就是要显示内容的，一格放不下
     let mut span_w = use_signal(|| clamp_span(existing.as_ref().map(|c| c.span_w).unwrap_or(2)));
     let mut span_h = use_signal(|| clamp_span(existing.as_ref().map(|c| c.span_h).unwrap_or(2)));
+    // 底色。空串是"没设过"，也就是选卡面板上那个「默认」——组件卡的默认是"半透明"，
+    // 由 models::effective_surface 在渲染时解析，这里存的仍是用户的原始选择。
+    let mut surface = use_signal(|| {
+        existing
+            .as_ref()
+            .map(|card| card.surface.clone())
+            .unwrap_or_default()
+    });
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 
@@ -116,6 +124,7 @@ pub fn WidgetForm(
                 .to_json(),
                 _ => String::new(),
             },
+            surface: surface(),
         };
 
         spawn(async move {
@@ -285,6 +294,25 @@ pub fn WidgetForm(
                 }
                 p { class: "field-hint",
                     "组件默认占 2×2。最大 {SPAN_MAX}×{SPAN_MAX}；窗口太窄放不下时宽度那一维会自动收回一格。"
+                }
+            }
+
+            div { class: "field",
+                span { class: "field-label", "卡片底色" }
+                div { class: "segmented wrap",
+                    for (id, label) in CARD_SURFACES {
+                        button {
+                            key: "{label}",
+                            class: if surface() == id { "segment active" } else { "segment" },
+                            r#type: "button",
+                            onclick: move |_| surface.set(id.to_string()),
+                            "{label}"
+                        }
+                    }
+                }
+                p { class: "field-hint",
+                    "组件卡默认带一层半透明的底：它的内容是文字与细线，压在花哨壁纸上会看不清。"
+                    "底色跟着主题走（深色主题深底浅字、浅色主题白底深字），不用自己配色。"
                 }
             }
 

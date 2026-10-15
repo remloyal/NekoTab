@@ -106,6 +106,10 @@ pub fn CardTile(
 
     let is_edit = editing && !selecting;
 
+    // 这张卡片该用的面（"没设过"在这里被解析成该种类的默认：组件卡有面、书签卡没有）。
+    // 解析放在 models 里，渲染层不必自己判断 kind 或处理空串。
+    let surface = bookmark.surface_class();
+
     // 组件正文：按 kind 分发。加新组件时这里加一条分支。
     let widget_body: Option<Element> = is_widget.then(|| match bookmark.kind.as_str() {
         KIND_CLOCK => rsx! {
@@ -153,6 +157,8 @@ pub fn CardTile(
             // 拖拽完全交给 Pointer Events：HTML5 原生拖放在触屏上不触发，
             // 而且 <a> 的默认拖拽会把链接地址当成拖拽数据，两者会打架。
             "data-bookmark-id": "{id}",
+            // 面的取值由 models::effective_surface 决定，CSS 按这个属性上底色
+            "data-surface": "{surface}",
             // 占几格告诉 CSS；图标大小则由 .tile 的容器查询按格子尺寸算，不必在这里算
             style: "--span-w: {span_w}; --span-h: {span_h};",
             href: safe_href(&bookmark.url),
@@ -280,6 +286,9 @@ pub fn CardTile(
 
             if let Some(body) = widget_body {
                 {body}
+                // 组件卡也要名字。几张组件摆一起时，光看内容不好认是哪一个，
+                // 而名字原来只存在于鼠标悬停的 tooltip 里。
+                div { class: "tile-label", "{bookmark.title}" }
             } else {
                 div {
                     class: "tile-icon",

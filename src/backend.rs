@@ -65,7 +65,7 @@ fn build_search_sql(keyword_count: usize, bookmarks_only: bool) -> String {
 
     let mut sql = String::from(
         "SELECT id, title, url, description, tags, group_id, icon, created_at, span_w, span_h, \
-         kind, config \
+         kind, config, surface \
          FROM bookmarks WHERE deleted_at IS NULL",
     );
 
@@ -96,6 +96,8 @@ pub(crate) struct CleanBookmark {
     pub span_h: i64,
     pub kind: String,
     pub config: String,
+    /// 卡片的面。空串＝没设过，用该种类的默认（见 `models::effective_surface`）。
+    pub surface: String,
 }
 
 /// 校验并规范化卡片入参。新增与修改共用，避免两处校验漂移。
@@ -134,6 +136,8 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
     // 跨度在这里夹好：0（老备份、调用方没传）会被抬到 1
     let span_w = clamp_span(input.span_w);
     let span_h = clamp_span(input.span_h);
+    // 面收敛到白名单；认不出的当成"没设过"，由渲染时的默认接手
+    let surface = crate::models::normalize_surface(&input.surface);
 
     // ---- 组件 ----
     if !kind.is_empty() {
@@ -176,6 +180,7 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
             span_h,
             kind,
             config,
+            surface,
         });
     }
 
@@ -211,6 +216,7 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
         kind,
         // 书签没有组件参数
         config: String::new(),
+        surface,
     })
 }
 
@@ -313,8 +319,9 @@ pub(crate) async fn insert_new_bookmark(
     let kind = row.kind;
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO bookmarks \
-         (title, url, description, tags, group_id, icon, span_w, span_h, kind, config, sort_order) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+         (title, url, description, tags, group_id, icon, span_w, span_h, kind, config, surface, \
+          sort_order) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
                  COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
@@ -328,6 +335,7 @@ pub(crate) async fn insert_new_bookmark(
     .bind(row.span_h)
     .bind(&kind)
     .bind(row.config)
+    .bind(row.surface)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -383,6 +391,8 @@ pub(crate) async fn quick_add(
             // 快捷添加只会加书签——它拿到的就是一个网址
             kind: crate::models::KIND_BOOKMARK.to_string(),
             config: String::new(),
+            // 没设过面：书签卡的默认是"无面"，与加进来之前的样子一致
+            surface: String::new(),
         },
     )
     .await
@@ -440,7 +450,7 @@ pub async fn add_bookmark(input: NewBookmark) -> Result<AddOutcome, ServerFnErro
         .map_err(ServerFnError::new)
 }
 
-/// 修改已有卡片（标题 / URL / 描述 / 标签 / 分组 / 图标 / 格子尺寸 / 组件参数），
+/// 修改已有卡片（标题 / URL / 描述 / 标签 / 分组 / 图标 / 格子尺寸 / 组件参数 / 底色），
 /// 不改排序位与种类。
 #[server]
 pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFnError> {
@@ -457,7 +467,7 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
 
     let affected = sqlx::query(
         "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
-         icon = ?, span_w = ?, span_h = ?, config = ? WHERE id = ?",
+         icon = ?, span_w = ?, span_h = ?, config = ?, surface = ? WHERE id = ?",
     )
     .bind(row.title)
     .bind(row.url)
@@ -468,6 +478,7 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
     .bind(row.span_w)
     .bind(row.span_h)
     .bind(row.config)
+    .bind(row.surface)
     .bind(id)
     .execute(db::pool())
     .await
@@ -1470,7 +1481,9 @@ mod tests {
                 span_h      INTEGER NOT NULL DEFAULT 1,
                 -- 与迁移 005 一致：卡片种类与组件参数
                 kind        TEXT NOT NULL DEFAULT '',
-                config      TEXT NOT NULL DEFAULT ''
+                config      TEXT NOT NULL DEFAULT '',
+                -- 与迁移 006 一致：卡片的面
+                surface     TEXT NOT NULL DEFAULT ''
             )",
         )
         .execute(&pool)
@@ -1644,6 +1657,7 @@ mod tests {
             span_h: 1,
             kind: crate::models::KIND_BOOKMARK.to_string(),
             config: String::new(),
+            surface: String::new(),
         }
     }
 
@@ -1660,6 +1674,8 @@ mod tests {
             span_h: 2,
             kind: kind.to_string(),
             config: String::new(),
+            // 组件卡默认有面，但那由渲染时的默认决定；库里仍存"没设过"
+            surface: String::new(),
         }
     }
 
@@ -1724,6 +1740,51 @@ mod tests {
         let all = run(&pool, "").await;
         let rust = all.iter().find(|b| b.title == "Rust 官网").expect("找到");
         assert_eq!((rust.span_w, rust.span_h), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn card_surface_is_normalised_by_clean_bookmark() {
+        // 归一化在 clean_bookmark 这一层做完（CleanBookmark 是"已校验"的类型，
+        // insert 只管写）。组件那条路不碰数据库，所以这里不需要连接池。
+        let input = NewBookmark {
+            title: "数字时钟".to_string(),
+            kind: crate::models::KIND_CLOCK.to_string(),
+            surface: "rainbow".to_string(),
+            ..Default::default()
+        };
+        let cleaned = clean_bookmark(&input).await.expect("组件不需要数据库");
+        assert_eq!(cleaned.surface, "", "认不出的面应收敛成'没设过'");
+
+        let cleaned = clean_bookmark(&NewBookmark {
+            surface: "solid".to_string(),
+            ..input
+        })
+        .await
+        .expect("组件不需要数据库");
+        assert_eq!(cleaned.surface, "solid", "白名单里的值原样保留");
+    }
+
+    #[tokio::test]
+    async fn card_surface_is_read_back_with_the_row() {
+        let pool = seed().await;
+
+        let mut solid = widget_row(crate::models::KIND_NOTE);
+        solid.surface = "solid".to_string();
+        let outcome = insert_new_bookmark(&pool, solid).await.expect("insert");
+
+        // Bookmark 的 FromRow 列清单里得有 surface 这一列
+        let items = run(&pool, "").await;
+        let saved = items.iter().find(|card| card.id == outcome.id).expect("找到");
+        assert_eq!(saved.surface, "solid");
+        assert_eq!(saved.surface_class(), "solid");
+
+        // 既有书签（surface 是空串）解析出来仍是"无面"——这次迁移不该改变它们的样子
+        let plain = items
+            .iter()
+            .find(|card| card.title == "Rust 官网")
+            .expect("找到");
+        assert_eq!(plain.surface, "");
+        assert_eq!(plain.surface_class(), "none");
     }
 
     #[tokio::test]
