@@ -65,6 +65,10 @@ const MOVE_TOLERANCE: f64 = 8.0;
 #[allow(clippy::too_many_arguments)]
 pub fn IconTile(
     bookmark: Bookmark,
+    /// 横向占几格（已按当前可用列数夹过）
+    span_w: i64,
+    /// 纵向占几格
+    span_h: i64,
     editing: bool,
     selecting: bool,
     selected: bool,
@@ -125,6 +129,8 @@ pub fn IconTile(
             // 拖拽完全交给 Pointer Events：HTML5 原生拖放在触屏上不触发，
             // 而且 <a> 的默认拖拽会把链接地址当成拖拽数据，两者会打架。
             "data-bookmark-id": "{id}",
+            // 占几格告诉 CSS；图标大小则由 .tile 的容器查询按格子尺寸算，不必在这里算
+            style: "--span-w: {span_w}; --span-h: {span_h};",
             href: safe_href(&bookmark.url),
             target: if new_tab { "_blank" } else { "_self" },
             rel: "noopener noreferrer",

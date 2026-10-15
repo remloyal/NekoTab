@@ -2,7 +2,9 @@ use dioxus::prelude::*;
 
 use super::icon_picker::IconPicker;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
-use crate::models::{AddOutcome, Bookmark, Group, NewBookmark};
+use crate::models::{
+    clamp_span, AddOutcome, Bookmark, Group, NewBookmark, SPAN_MAX, SPAN_PRESETS,
+};
 
 /// 书签表单，作为弹窗内容使用。
 ///
@@ -43,6 +45,9 @@ pub fn BookmarkForm(
             .map(|id| id.to_string())
             .unwrap_or_default()
     });
+    // 卡片占几格。老数据没有这个字段（0）时按一格显示
+    let mut span_w = use_signal(|| clamp_span(existing.as_ref().map(|b| b.span_w).unwrap_or(1)));
+    let mut span_h = use_signal(|| clamp_span(existing.as_ref().map(|b| b.span_h).unwrap_or(1)));
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
 
@@ -58,6 +63,8 @@ pub fn BookmarkForm(
             tags: existing_tags.clone(),
             group_id: group_id().parse().ok(),
             icon: icon(),
+            span_w: span_w(),
+            span_h: span_h(),
         };
 
         spawn(async move {
@@ -150,6 +157,28 @@ pub fn BookmarkForm(
                 }
                 p { class: "field-hint",
                     "分组决定卡片出现在哪个分类标签页下（一条书签只属于一个分组）；在设置 → 分组管理里增删。"
+                }
+            }
+
+            div { class: "field",
+                span { class: "field-label", "格子大小" }
+                div { class: "segmented wrap",
+                    for (w, h) in SPAN_PRESETS {
+                        button {
+                            key: "{w}x{h}",
+                            class: if span_w() == w && span_h() == h { "segment active" } else { "segment" },
+                            r#type: "button",
+                            onclick: move |_| {
+                                span_w.set(w);
+                                span_h.set(h);
+                            },
+                            "{w}×{h}"
+                        }
+                    }
+                }
+                p { class: "field-hint",
+                    "卡片占几格（宽 × 高），最大 {SPAN_MAX}×{SPAN_MAX}。只影响排版，不影响顺序、分页与拖拽；"
+                    "窗口太窄放不下时宽度那一维会自动收回一格。"
                 }
             }
 

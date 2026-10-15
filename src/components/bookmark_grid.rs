@@ -15,6 +15,9 @@ const DRAG_TOLERANCE: f64 = 8.0;
 #[allow(clippy::too_many_arguments)]
 pub fn BookmarkGrid(
     items: Vec<Bookmark>,
+    /// 容器当前能排出的列数（`None` = 还没量到，不夹取跨度）。
+    /// 跨格卡片的宽度会被收到这个数以内，见 `models::clamp_span_w`。
+    columns: Option<usize>,
     editing: bool,
     selecting: bool,
     selected: Vec<i64>,
@@ -78,6 +81,8 @@ pub fn BookmarkGrid(
     rsx! {
         div {
             class: "{class}",
+            // 跨格卡片的宽度要按这个元素量出来的实际宽度夹取（见 dom::element_width）
+            id: crate::dom::GRID_ELEMENT_ID,
 
             // 拖拽过程中指针可能落在任何一张卡片上，也可能滑出网格；
             // 事件最终都会冒泡到这里，所以移动与抬手都在这一层处理。
@@ -133,6 +138,9 @@ pub fn BookmarkGrid(
                 IconTile {
                     key: "{item.id}",
                     bookmark: item.clone(),
+                    // 宽度按可用列数夹取；高度不受列数影响
+                    span_w: crate::models::clamp_span_w(item.span_w, columns),
+                    span_h: crate::models::clamp_span(item.span_h),
                     editing,
                     selecting,
                     selected: selected.contains(&item.id),

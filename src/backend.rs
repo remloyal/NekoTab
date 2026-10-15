@@ -11,6 +11,9 @@ use crate::models::{
     AddOutcome, Bookmark, Engine, Group, ImportReport, NewBookmark, NewEngine, NewGroup, Quote,
     Settings, TrashItem,
 };
+// 只在服务端的入库校验里用到（客户端的夹取在组件层）
+#[cfg(feature = "server")]
+use crate::models::clamp_span;
 
 /// 把 `ServerFnError` 转成可直接展示给用户的文案。
 ///
@@ -57,8 +60,8 @@ fn build_search_sql(keyword_count: usize) -> String {
                            OR tags LIKE ? ESCAPE '\\')";
 
     let mut sql = String::from(
-        "SELECT id, title, url, description, tags, group_id, icon, created_at FROM bookmarks \
-         WHERE deleted_at IS NULL",
+        "SELECT id, title, url, description, tags, group_id, icon, created_at, span_w, span_h \
+         FROM bookmarks WHERE deleted_at IS NULL",
     );
 
     if keyword_count > 0 {
@@ -71,12 +74,22 @@ fn build_search_sql(keyword_count: usize) -> String {
     sql
 }
 
-/// 校验并规范化书签入参，返回 `(title, url, description, tags, group_id, icon)`。
-/// 新增与修改共用，避免两处校验漂移。
+/// 校验并规范化之后的入库字段。新增与修改共用，避免两处校验漂移。
 #[cfg(feature = "server")]
-async fn clean_bookmark(
-    input: &NewBookmark,
-) -> Result<(String, String, String, String, Option<i64>, String), String> {
+pub(crate) struct CleanBookmark {
+    pub title: String,
+    pub url: String,
+    pub description: String,
+    pub tags: String,
+    pub group_id: Option<i64>,
+    pub icon: String,
+    pub span_w: i64,
+    pub span_h: i64,
+}
+
+/// 校验并规范化书签入参。新增与修改共用，避免两处校验漂移。
+#[cfg(feature = "server")]
+async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
     let title = input.title.trim().to_string();
     let url = input.url.trim().to_string();
     let description = input.description.trim().to_string();
@@ -113,14 +126,17 @@ async fn clean_bookmark(
         return Err("图标需为内置图标、http(s) 地址或以 / 开头的本站路径".to_string());
     }
 
-    Ok((
+    Ok(CleanBookmark {
         title,
         url,
         description,
-        normalize_tags(&input.tags),
+        tags: normalize_tags(&input.tags),
         group_id,
         icon,
-    ))
+        // 跨度在这里夹好：0（老备份、调用方没传）会被抬到 1
+        span_w: clamp_span(input.span_w),
+        span_h: clamp_span(input.span_h),
+    })
 }
 
 /// 规范化标签：按逗号拆分、去空白、丢空项、去重、重新用逗号连接。
@@ -184,19 +200,14 @@ pub async fn list_bookmarks(query: String) -> Result<Vec<Bookmark>, ServerFnErro
 #[cfg(feature = "server")]
 pub(crate) async fn insert_new_bookmark(
     pool: &sqlx::SqlitePool,
-    title: String,
-    url: String,
-    description: String,
-    tags: String,
-    group_id: Option<i64>,
-    icon: String,
+    row: CleanBookmark,
 ) -> Result<AddOutcome, String> {
     // 同一个 URL 有多条（历史遗留）时，优先命中正常条目，其次才是回收站里的
     let existing: Option<(i64, Option<String>)> = sqlx::query_as(
         "SELECT id, deleted_at FROM bookmarks WHERE url = ? \
          ORDER BY (deleted_at IS NOT NULL) ASC, id ASC LIMIT 1",
     )
-    .bind(&url)
+    .bind(&row.url)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("检查重复失败: {e}"))?;
@@ -210,16 +221,20 @@ pub(crate) async fn insert_new_bookmark(
     }
 
     let id = sqlx::query_scalar::<_, i64>(
-        "INSERT INTO bookmarks (title, url, description, tags, group_id, icon, sort_order) \
-         VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
+        "INSERT INTO bookmarks \
+         (title, url, description, tags, group_id, icon, span_w, span_h, sort_order) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, \
+                 COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
-    .bind(title)
-    .bind(url)
-    .bind(description)
-    .bind(tags)
-    .bind(group_id)
-    .bind(icon)
+    .bind(row.title)
+    .bind(row.url)
+    .bind(row.description)
+    .bind(row.tags)
+    .bind(row.group_id)
+    .bind(row.icon)
+    .bind(row.span_w)
+    .bind(row.span_h)
     .fetch_one(pool)
     .await
     .map_err(|e| format!("保存书签失败: {e}"))?;
@@ -256,12 +271,17 @@ pub(crate) async fn quick_add(
 
     insert_new_bookmark(
         pool,
-        title,
-        url.to_string(),
-        description.trim().to_string(),
-        String::new(),
-        None,
-        String::new(),
+        CleanBookmark {
+            title,
+            url: url.to_string(),
+            description: description.trim().to_string(),
+            tags: String::new(),
+            group_id: None,
+            icon: String::new(),
+            // 快捷添加只给 URL，格子尺寸用默认的一格
+            span_w: 1,
+            span_h: 1,
+        },
     )
     .await
 }
@@ -307,36 +327,36 @@ pub(crate) async fn ensure_url_not_taken(
 pub async fn add_bookmark(input: NewBookmark) -> Result<AddOutcome, ServerFnError> {
     use crate::db;
 
-    let (title, url, description, tags, group_id, icon) =
-        clean_bookmark(&input).await.map_err(ServerFnError::new)?;
+    let row = clean_bookmark(&input).await.map_err(ServerFnError::new)?;
 
-    insert_new_bookmark(db::pool(), title, url, description, tags, group_id, icon)
+    insert_new_bookmark(db::pool(), row)
         .await
         .map_err(ServerFnError::new)
 }
 
-/// 修改已有书签（标题 / URL / 描述 / 标签 / 分组 / 图标），不改排序位。
+/// 修改已有书签（标题 / URL / 描述 / 标签 / 分组 / 图标 / 格子尺寸），不改排序位。
 #[server]
 pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFnError> {
     use crate::db;
 
-    let (title, url, description, tags, group_id, icon) =
-        clean_bookmark(&input).await.map_err(ServerFnError::new)?;
+    let row = clean_bookmark(&input).await.map_err(ServerFnError::new)?;
 
-    ensure_url_not_taken(db::pool(), id, &url)
+    ensure_url_not_taken(db::pool(), id, &row.url)
         .await
         .map_err(ServerFnError::new)?;
 
     let affected = sqlx::query(
         "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
-         icon = ? WHERE id = ?",
+         icon = ?, span_w = ?, span_h = ? WHERE id = ?",
     )
-    .bind(title)
-    .bind(url)
-    .bind(description)
-    .bind(tags)
-    .bind(group_id)
-    .bind(icon)
+    .bind(row.title)
+    .bind(row.url)
+    .bind(row.description)
+    .bind(row.tags)
+    .bind(row.group_id)
+    .bind(row.icon)
+    .bind(row.span_w)
+    .bind(row.span_h)
     .bind(id)
     .execute(db::pool())
     .await
@@ -1017,8 +1037,9 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         }
 
         sqlx::query(
-            "INSERT INTO bookmarks (title, url, description, tags, group_id, icon, sort_order) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO bookmarks \
+             (title, url, description, tags, group_id, icon, span_w, span_h, sort_order) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(if title.is_empty() { url.clone() } else { title })
         .bind(&url)
@@ -1026,6 +1047,9 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         .bind(normalize_tags(&item.tags))
         .bind(group_id)
         .bind(item.icon.trim())
+        // JSON 备份里的跨度原样搬回（Netscape 解析出来的恒为 1）
+        .bind(clamp_span(item.span_w))
+        .bind(clamp_span(item.span_h))
         .bind(next_sort)
         .execute(&mut *tx)
         .await
@@ -1305,7 +1329,10 @@ mod tests {
                 icon        TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 sort_order  INTEGER NOT NULL DEFAULT 0,
-                deleted_at  TEXT
+                deleted_at  TEXT,
+                -- 与迁移 004 一致：卡片跨几格，默认一格
+                span_w      INTEGER NOT NULL DEFAULT 1,
+                span_h      INTEGER NOT NULL DEFAULT 1
             )",
         )
         .execute(&pool)
@@ -1466,21 +1493,27 @@ mod tests {
             .expect("count")
     }
 
+    /// 一个最小可入库行；只关心去重与跨度时用得上。
+    fn row(title: &str, url: &str) -> CleanBookmark {
+        CleanBookmark {
+            title: title.to_string(),
+            url: url.to_string(),
+            description: String::new(),
+            tags: String::new(),
+            group_id: None,
+            icon: String::new(),
+            span_w: 1,
+            span_h: 1,
+        }
+    }
+
     #[tokio::test]
     async fn existing_url_is_not_inserted_again() {
         let pool = seed().await;
 
-        let hit = insert_new_bookmark(
-            &pool,
-            "Rust 官网（重复）".to_string(),
-            "https://rust-lang.org".to_string(),
-            String::new(),
-            String::new(),
-            None,
-            String::new(),
-        )
-        .await
-        .expect("insert");
+        let hit = insert_new_bookmark(&pool, row("Rust 官网（重复）", "https://rust-lang.org"))
+            .await
+            .expect("insert");
 
         assert!(!hit.created, "同一个网址不该写第二条");
         assert_eq!(hit.id, 1, "应返回已有记录的 id");
@@ -1488,17 +1521,9 @@ mod tests {
         assert_eq!(count(&pool).await, 4, "总数不变");
 
         // 全新网址照常写入
-        let fresh = insert_new_bookmark(
-            &pool,
-            "新的".to_string(),
-            "https://new.example".to_string(),
-            String::new(),
-            String::new(),
-            None,
-            String::new(),
-        )
-        .await
-        .expect("insert");
+        let fresh = insert_new_bookmark(&pool, row("新的", "https://new.example"))
+            .await
+            .expect("insert");
         assert!(fresh.created);
         assert_eq!(count(&pool).await, 5);
     }
@@ -1512,21 +1537,37 @@ mod tests {
             .await
             .unwrap();
 
-        let hit = insert_new_bookmark(
-            &pool,
-            "Rust 官网".to_string(),
-            "https://rust-lang.org".to_string(),
-            String::new(),
-            String::new(),
-            None,
-            String::new(),
-        )
-        .await
-        .expect("insert");
+        let hit = insert_new_bookmark(&pool, row("Rust 官网", "https://rust-lang.org"))
+            .await
+            .expect("insert");
 
         assert!(!hit.created, "回收站里的同网址也算重复");
         assert!(hit.in_trash, "要能区分出它躺在回收站里");
         assert_eq!(count(&pool).await, 4);
+    }
+
+    #[tokio::test]
+    async fn spans_are_stored_and_read_back() {
+        let pool = seed().await;
+
+        let mut spanning = row("大卡片", "https://big.example");
+        spanning.span_w = 2;
+        spanning.span_h = 3;
+        let outcome = insert_new_bookmark(&pool, spanning)
+            .await
+            .expect("insert");
+
+        // 列表接口要把它带出来（Bookmark 的 FromRow 列清单里得有这两列）
+        let items = run(&pool, "big").await;
+        let saved = items.iter().find(|b| b.id == outcome.id).expect("找到");
+        assert_eq!((saved.span_w, saved.span_h), (2, 3));
+
+        // 老数据 / 没设过的仍是 1×1
+        let plain = items.iter().find(|b| b.title == "Rust 官网");
+        assert!(plain.is_none(), "关键词只筛 big");
+        let all = run(&pool, "").await;
+        let rust = all.iter().find(|b| b.title == "Rust 官网").expect("找到");
+        assert_eq!((rust.span_w, rust.span_h), (1, 1));
     }
 
     #[tokio::test]

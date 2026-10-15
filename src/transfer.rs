@@ -261,6 +261,9 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
                         tags: tags_from_folders(&folders),
                         group: group_from_folders(&folders),
                         icon: String::new(),
+                        // Netscape 格式没有"跨度"这个概念，导入即 1×1
+                        span_w: 1,
+                        span_h: 1,
                         inline_icon,
                     });
                 }
@@ -540,12 +543,15 @@ mod tests {
             tags: "dev".to_string(),
             group: "开发".to_string(),
             icon: "i:code".to_string(),
+            span_w: 2,
+            span_h: 2,
             inline_icon: None,
         }];
 
         let back = parse_json(&to_json(&items)).expect("解析自身备份");
         assert_eq!(back, items);
         assert_eq!(back[0].group, "开发");
+        assert_eq!((back[0].span_w, back[0].span_h), (2, 2), "跨度要进备份");
     }
 
     #[test]

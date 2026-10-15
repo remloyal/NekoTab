@@ -239,6 +239,35 @@ pub fn copy_text(text: &str) {
 #[cfg(not(feature = "web"))]
 pub fn copy_text(_text: &str) {}
 
+/// 网格元素的 id。跨格卡片要按它量出来的宽度决定最多跨几格。
+pub const GRID_ELEMENT_ID: &str = "nekotab-grid";
+
+/// 读某个元素当前的宽度（`None` = 元素不在，例如简约模式下网格被隐藏）。
+///
+/// 为什么要实测：跨格卡片的宽度要收到容器**当前**排得出的列数以内，否则多出来的
+/// 那一列（隐式轨道）会塌成 0 宽，后面的卡片被塞进 0 宽轨道里、整片版面错乱
+/// （见 `models::clamp_span_w`）。而这个列数只取决于容器宽度，跟设置里的
+/// "每行最大列数"是两回事——所以只能量。
+///
+/// 直接读 DOM，不走 `document::eval` 的消息通道：那个通道是"脚本体的同步部分跑完
+/// 就 `dioxus.close()`"（见 dioxus-web 的 PROMISE_WRAPPER），把异步回调里的
+/// `dioxus.send` 塞进去收不到。由调用方用定时器轮询，元素被换掉（切简约模式）
+/// 也照样重新查到。
+#[cfg(feature = "web")]
+pub fn element_width(id: &str) -> Option<f64> {
+    let element = document()?.get_element_by_id(id)?;
+    // 用 clientWidth（内容盒宽度）而不是 getBoundingClientRect：`auto-fit` 排几条
+    // 轨道依据的正是内容盒宽度，两边口径一致；整数像素对这里的判断也够用。
+    Some(element.client_width() as f64)
+}
+
+#[cfg(not(feature = "web"))]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+pub fn element_width(_id: &str) -> Option<f64> {
+    None
+}
+
+
 /// 单调递增的毫秒时间戳，用于事件节流。
 #[cfg(feature = "web")]
 pub fn now_ms() -> f64 {

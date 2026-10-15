@@ -19,6 +19,10 @@ pub struct Bookmark {
     pub icon: String,
     /// UTC 时间字符串，形如 `2026-10-12 08:30:00`
     pub created_at: String,
+    /// 卡片横向占几格，见 [`SPAN_MAX`]
+    pub span_w: i64,
+    /// 卡片纵向占几格
+    pub span_h: i64,
 }
 
 /// 新增/修改书签的入参。
@@ -34,6 +38,12 @@ pub struct NewBookmark {
     /// 留空表示自动取站点图标
     #[serde(default)]
     pub icon: String,
+    /// 卡片占几格（宽）。缺省 / 非法值由 [`clamp_span`] 收到合法范围，0 视作 1，
+    /// 因此老备份与不传这个字段的调用方都退化成 1×1。
+    #[serde(default)]
+    pub span_w: i64,
+    #[serde(default)]
+    pub span_h: i64,
 }
 
 /// 新增书签的结果。
@@ -115,6 +125,51 @@ pub const BACKGROUND_PRESETS: [&str; 6] =
 
 /// 主题：跟随系统 / 深色 / 浅色。
 pub const THEMES: [&str; 3] = ["system", "dark", "light"];
+
+/// 卡片跨度（占几格）的上下限。
+pub const SPAN_MIN: i64 = 1;
+pub const SPAN_MAX: i64 = 3;
+
+/// 表单里可选的格子尺寸（宽 × 高）。宽最多 2 列、高最多 3 行，够拼出
+/// 「一张大的 + 一圈小的」这种版面，又不至于一屏放不下几张卡。
+pub const SPAN_PRESETS: [(i64, i64); 6] =
+    [(1, 1), (2, 1), (1, 2), (2, 2), (1, 3), (2, 3)];
+
+/// 把跨度夹到合法范围。0（老备份、表单没传）会被抬到 1，也就是默认的一格。
+pub fn clamp_span(span: i64) -> i64 {
+    span.clamp(SPAN_MIN, SPAN_MAX)
+}
+
+/// 按当前能排出的列数夹取横向跨度。
+///
+/// `columns` 为 `None` 表示网格宽度还没量到（SSR、或网格尚未挂载），此时不夹。
+///
+/// 为什么要夹：放不下时多出来的那一列是**隐式轨道**，宽度会塌成 0，卡片于是变成
+/// 「一格 + 一个间距」宽（实测 1 列容器里 `span 2` 得到 104px，而正常一格是 96px）。
+/// 不会溢出容器，但会比同列的其它卡片宽出一个间距、左右边缘对不齐。夹掉之后
+/// 卡片始终落在整数格上。
+pub fn clamp_span_w(span_w: i64, columns: Option<usize>) -> i64 {
+    let span = clamp_span(span_w);
+    match columns {
+        Some(columns) => span.min(columns.max(1) as i64),
+        None => span,
+    }
+}
+
+/// 网格在给定宽度下实际能排出几列。
+///
+/// 与 CSS `repeat(auto-fit, Npx)` 的算法一致：n 列需要 `n * 卡片宽 + (n-1) * 横向间距`，
+/// 反过来就是 `floor((宽 + 间距) / (卡片宽 + 间距))`。跨格卡片能不能放下要看这个数，
+/// 而它只取决于容器宽度，跟设置里的"每行最大列数"无关，所以只能实测宽度后现算。
+pub fn columns_for(width: f64, tile_size: i64, gap_x: i64) -> usize {
+    if !(width > 0.0) || tile_size <= 0 {
+        return 1;
+    }
+
+    let gap = gap_x.max(0) as f64;
+    let step = tile_size as f64 + gap;
+    (((width + gap) / step).floor() as i64).max(1) as usize
+}
 
 /// 主页设置。纯键值存储，加字段不需要迁移（见 `to_pairs` / `from_pairs`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -374,6 +429,12 @@ pub struct ImportedBookmark {
     /// 自定义图标（与 `Bookmark::icon` 同一套约定）
     #[serde(default)]
     pub icon: String,
+    /// 卡片占几格。Netscape HTML 表达不了这个，只有 JSON 备份能原样搬回来；
+    /// 缺省 0 经 [`clamp_span`] 收成 1，所以老备份仍是 1×1。
+    #[serde(default)]
+    pub span_w: i64,
+    #[serde(default)]
+    pub span_h: i64,
     /// 浏览器导出文件里内联的图标（`ICON="data:…"`）。
     ///
     /// 只在导入方向有意义：Firefox 一类浏览器会把已缓存的站点图标直接内联进
@@ -393,6 +454,8 @@ impl ImportedBookmark {
             tags: bookmark.tags.clone(),
             group: group_name.to_string(),
             icon: bookmark.icon.clone(),
+            span_w: bookmark.span_w,
+            span_h: bookmark.span_h,
             inline_icon: None,
         }
     }
@@ -514,6 +577,48 @@ mod tests {
         // 列模板不随列数变——列数只在宽度上封顶，不写死轨道数
         assert_eq!(settings.grid_template_columns(), "repeat(auto-fit, 80px)");
         assert_eq!(settings.grid_max_width(), "calc(80px * 5 + 10px * 4)");
+    }
+
+    #[test]
+    fn columns_match_what_auto_fit_actually_does() {
+        // 前三个数是拿浏览器实测的网格对过的：容器 900px / 上限 4 列(408px) / 320px
+        // 分别排出 8 / 4 / 3 列（见 README 的实测记录）。跨格卡片能放下几格就看它。
+        assert_eq!(columns_for(900.0, 96, 8), 8);
+        assert_eq!(columns_for(408.0, 96, 8), 4);
+        assert_eq!(columns_for(320.0, 96, 8), 3);
+
+        // 刚好放下一列，以及还没测到宽度 / 非法输入
+        assert_eq!(columns_for(96.0, 96, 8), 1);
+        assert_eq!(columns_for(0.0, 96, 8), 1, "还没测到宽度时至少算 1 列");
+        assert_eq!(columns_for(-5.0, 96, 8), 1);
+    }
+
+    #[test]
+    fn spans_are_clamped() {
+        assert_eq!(clamp_span(0), 1, "没设过 / 老备份一律当一格");
+        assert_eq!(clamp_span(-3), 1);
+        assert_eq!(clamp_span(2), 2);
+        assert_eq!(clamp_span(99), SPAN_MAX);
+    }
+
+    #[test]
+    fn span_width_is_clamped_to_available_columns() {
+        assert_eq!(clamp_span_w(2, Some(4)), 2, "放得下就不动");
+        assert_eq!(
+            clamp_span_w(2, Some(1)),
+            1,
+            "只排得下 1 列时必须收成 1，否则会撑出隐式列、横向溢出"
+        );
+        assert_eq!(clamp_span_w(2, None), 2, "还没测到宽度时不夹");
+        assert_eq!(clamp_span_w(0, Some(3)), 1);
+    }
+
+    #[test]
+    fn span_presets_are_within_range() {
+        for (w, h) in SPAN_PRESETS {
+            assert!((SPAN_MIN..=SPAN_MAX).contains(&w), "{w} 超出范围");
+            assert!((SPAN_MIN..=SPAN_MAX).contains(&h), "{h} 超出范围");
+        }
     }
 
     #[test]

@@ -343,6 +343,31 @@ pub fn Home() -> Element {
         settings.grid_max_width(),
     );
 
+    // ---- 网格实际列数 ----
+    // 跨格卡片不能超过容器当前排得出的列数（否则会撑出隐式列、横向溢出），
+    // 而列数由容器宽度决定、跟设置无关，所以只能实测宽度后现算。
+    #[cfg_attr(feature = "server", allow(unused_mut))]
+    let mut grid_width = use_signal(|| 0.0f64);
+    use_future(move || async move {
+        #[cfg(feature = "web")]
+        loop {
+            // 直接量 DOM，不用 eval 的消息通道（那个通道在脚本同步部分跑完就关了，
+            // 异步回调里的 send 收不到，见 dom::element_width 的说明）
+            if let Some(width) = crate::dom::element_width(crate::dom::GRID_ELEMENT_ID) {
+                // peek 而不是读信号：免得这个循环订阅自己写的值
+                if (width - *grid_width.peek()).abs() > 0.5 {
+                    grid_width.set(width);
+                }
+            }
+            // 宽度只在窗口尺寸变化时变，250ms 足够跟上，也不至于把重排拖到肉眼可见
+            gloo_timers::future::TimeoutFuture::new(250).await;
+        }
+    });
+    // 还没量到宽度时传 None：不夹取，而不是把每张卡都压成 1 格
+    let grid_columns = (grid_width() > 0.0).then(|| {
+        crate::models::columns_for(grid_width(), settings.tile_size, settings.tile_gap_x)
+    });
+
     // ---- 拖拽落位 ----
     //
     // 落位语义是「把被拖的这条挪到目标那条的位置」，在全量顺序上做，因此
@@ -641,6 +666,7 @@ pub fn Home() -> Element {
                         }
                         BookmarkGrid {
                             items: view.clone(),
+                            columns: grid_columns,
                             editing: is_editing,
                             selecting: is_selecting,
                             selected: selected_ids.clone(),
@@ -957,6 +983,8 @@ mod tests {
             group_id: None,
             icon: String::new(),
             created_at: String::new(),
+            span_w: 1,
+            span_h: 1,
         }
     }
 
