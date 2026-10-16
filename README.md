@@ -531,6 +531,23 @@ dx build --release --platform web
 
 ## Docker
 
+### 用已发布的多架构镜像（推荐）
+
+`docker-compose.yml` 默认直接拉 `remloyal001/nekotab:latest`（amd64 + arm64 合在一个
+manifest 里）：
+
+```bash
+docker compose up -d                        # 拉取并启动
+docker compose pull && docker compose up -d  # 升级到新镜像
+docker compose logs -f
+```
+
+数据用 bind mount 放在宿主目录，默认是仓库下的 `./data`（与本地开发的约定一致），
+可用 `NEKOTAB_DATA` 指向别处、`NEKOTAB_PORT` 换宿主端口。
+**要放在本地磁盘，别放 NFS / SMB 这类网络文件系统**——SQLite 的 WAL 依赖正常文件锁。
+
+### 自己构建
+
 ```bash
 docker build -t nekotab .
 docker run -d --name nekotab \
@@ -539,9 +556,36 @@ docker run -d --name nekotab \
   nekotab
 ```
 
-数据落在 `/data/mtab.db`（连同 WAL 的 `-wal` / `-shm` 文件），图标落在
-`/data/icon`，上传的壁纸落在 `/data/wallpaper`，容器重建都不丢。
-镜像里 `ICON_DIR` 与 `WALLPAPER_DIR` 都已指向挂载卷。
+镜像是多阶段的：构建阶段装工具链并跑一次 `dx build --release --platform web`，
+运行阶段只留 `debian:bookworm-slim` + 产物。首次构建要下 Rust 镜像、`cargo install
+dioxus-cli` 并全量编译，是十几分钟量级；之后由 Docker 层缓存接管。
+
+要「本地编译一次、部署时秒构建」，用 `Dockerfile.prebuilt`：先在 **Linux 环境**
+（WSL / CI / rust 容器）里跑 `bash scripts/pack-linux.sh` 把产物打到 `dist/<arch>/`，
+再以那个目录为上下文构建运行镜像。产物**必须是 Linux 的**——Windows 上 dx 产出的是
+`server-*.exe`，容器里跑不起来。
+
+`scripts/publish.sh` 把上面两步连起来：本机按架构打包 → 各架构分别 build & push →
+合成多架构 manifest。Git Bash / MSYS 下它会自动把自己丢进 WSL 重跑一遍，所以
+**Windows 上直接 `bash scripts/publish.sh` 即可**。支持 `DRY_RUN=1`（只打印命令）、
+`SKIP_BUILD=1`、`ARCHES=...`。
+
+### 数据、升级与出网
+
+数据落在 `/data/mtab.db`（连同 WAL 的 `-wal` / `-shm` 文件），图标落在 `/data/icon`，
+上传的壁纸落在 `/data/wallpaper`：容器重建都不丢。镜像里 `ICON_DIR` 与
+`WALLPAPER_DIR` 都已指向挂载卷。
+
+**升级只需换镜像**：数据库迁移随二进制编译进去（`sqlx::migrate!`），启动时自动应用，
+没有单独的迁移步骤。
+
+但要留意**反向不成立**：拿旧镜像跑已经升级过的库会**直接启动失败**，报
+`migration N was previously applied but is missing in the resolved migrations`
+——sqlx 默认不允许"库里已应用、而当前二进制里没有"的迁移。回退镜像时得先把多出来的
+那几条记录从 `_sqlx_migrations` 里删掉（列本身可以留着，旧代码不认识就不会碰）。
+
+**「一言」与「天气」需要服务端能出网**（前者取一言接口，后者取 Open-Meteo，
+都不需要密钥）。纯内网部署时这两处会保持空白 / 显示取不到，其余功能不受影响。
 
 注意：服务端运行时会读取可执行文件同级的 `public/` 目录，因此镜像里要连同
 `public/` 一起拷贝，不能只拷二进制。
@@ -567,8 +611,10 @@ docker run -d --name nekotab \
   代价是同一行放不下的大卡片会被挤到下一行，中间留洞。另外跨度只有 JSON
   备份能原样搬回，`/export/bookmarks.html`（Netscape 格式）没有这个概念，
   导回浏览器再导回来一律变成 1×1。
-- **高卡片目前大多是空的。** 1×3 / 2×3 这些形状现在只有居中的一个图标，
-  纵向空间是留给后续卡片内容（预览图、备注）的。
+- **书签卡做成纵向长条时上下会留白。** 图标块按格子的**短边**缩放（这样跨格时不会
+  中间一个小图标、四周一圈空），所以 1×3 / 2×3 这种"窄而高"的书签卡，图标仍受宽度
+  约束，纵向空间就空着。组件卡会把它用满——记事本、天气、两个时钟都按格子的宽高
+  自适应排版。
 - **拖拽排序作用在全量顺序上。** 筛选或分页时，被拖的卡片落到**目标在全量里的
   位置**，中间那些书签（包括被筛掉、当前看不见的）依次让位。所以看到的落位与
   最终顺序一致；代价是一次跨页拖动会连带挪动中间的书签——这是「顺序唯一」的必然
