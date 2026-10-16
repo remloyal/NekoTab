@@ -560,6 +560,11 @@ docker run -d --name nekotab \
 运行阶段只留 `debian:bookworm-slim` + 产物。首次构建要下 Rust 镜像、`cargo install
 dioxus-cli` 并全量编译，是十几分钟量级；之后由 Docker 层缓存接管。
 
+**构建不需要访问 GitHub。** dx 收尾会想从 GitHub Releases 下 wasm-opt（binaryen），
+在连不上 GitHub 的网络里整个构建会倒在最后一步、且报错像"编译失败"。所以
+`Dockerfile` 里把发行版的 `binaryen` 直接放进 dx 的工具缓存目录，让它不去下载
+（细节写在 Dockerfile 的注释里，含"dx 升级后要跟着改哪个数字"）。
+
 要「本地编译一次、部署时秒构建」，用 `Dockerfile.prebuilt`：先在 **Linux 环境**
 （WSL / CI / rust 容器）里跑 `bash scripts/pack-linux.sh` 把产物打到 `dist/<arch>/`，
 再以那个目录为上下文构建运行镜像。产物**必须是 Linux 的**——Windows 上 dx 产出的是

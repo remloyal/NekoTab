@@ -12,8 +12,13 @@
 # 的 glibc 保持一致。
 FROM rust:1.94-slim-bookworm AS builder
 
+# dx 下载的工具（wasm-opt / wasm-bindgen…）都放在 $DX_HOME/tools 下。
+# 显式钉住这个路径，下面才能把 wasm-opt 预先放进去，而不依赖 dx 的默认值。
+ENV DX_HOME=/opt/dx
+
 # libssl-dev 是 dioxus-cli 依赖链里 openssl-sys 的硬需求，缺了会在
 # `cargo install dioxus-cli` 处报 "Could not find openssl via pkg-config"。
+# binaryen 见下面那条：用来让 wasm-opt 走发行版，而不是去 GitHub 下。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         ca-certificates \
@@ -22,7 +27,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         make \
         cmake \
         g++ \
+        binaryen \
     && rm -rf /var/lib/apt/lists/*
+
+# 把发行版的 wasm-opt 放进 dx 的工具缓存目录。
+#
+# 为什么需要：dx 收尾时用 wasm-opt 压 wasm，而它**默认去 GitHub Releases 下 binaryen**。
+# 在连不上 GitHub 的网络里（内网 CI、国内直连），整个构建会倒在最后一步——前面客户端与
+# 服务端其实都已编译成功，报错却是 "Failed to create wasm-opt instance: error sending
+# request for url (https://github.com/WebAssembly/binaryen/releases/…)"，很难归因。
+#
+# dx 的查找顺序是"先看自己的缓存目录，命中就不下载"（dioxus-cli 的
+# wasm_opt::get_binary_path），所以落到那个目录即可。**不用 NO_DOWNLOADS=1**：那是全局
+# 开关，会连带让 wasm-bindgen 也改去 PATH 找，反而更麻烦。
+#
+# 目录名里的 129 是 dx 内部的 BINARYEN_VERSION 常量。**dx 升级后这里要跟着改**——改错了
+# 不会报错，只是悄悄退回"去 GitHub 下"，也就是回到连不上时的那个失败。
+# 发行版自带的是 108（比 dx 想下的 127 旧）：实测 dx 传的那组参数它全都接受，
+# 优化效果可能略差一点，但换来的是这个镜像在任何网络里都能构建。
+RUN mkdir -p "$DX_HOME/tools/binaryen-129/bin" \
+    && ln -s /usr/bin/wasm-opt "$DX_HOME/tools/binaryen-129/bin/wasm-opt"
 
 # dx 构建 web 客户端需要 wasm 目标
 RUN rustup target add wasm32-unknown-unknown
