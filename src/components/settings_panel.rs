@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
 
+use super::background_panel::BackgroundPanel;
 use super::group_settings::GroupSettings;
 use super::quick_add_panel::QuickAddPanel;
 use super::trash_panel::TrashPanel;
-use super::wallpaper_panel::WallpaperPanel;
 use crate::backend::{clear_icon_cache, error_text, import_bookmarks, save_settings};
 use crate::models::{Group, ImportReport, Settings, BACKGROUND_PRESETS, THEMES};
 
@@ -39,6 +39,7 @@ if (!file) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Appearance,
+    Background,
     Layout,
     Clock,
     Behavior,
@@ -49,8 +50,9 @@ enum Section {
 }
 
 /// `(分区, 菜单文字)`。顺序即左侧菜单的显示顺序。
-const SECTIONS: [(Section, &str); 8] = [
+const SECTIONS: [(Section, &str); 9] = [
     (Section::Appearance, "外观"),
+    (Section::Background, "背景"),
     (Section::Layout, "卡片与布局"),
     (Section::Clock, "时钟与一言"),
     (Section::Behavior, "打开与翻页"),
@@ -65,8 +67,38 @@ impl Section {
     fn is_settings(self) -> bool {
         matches!(
             self,
-            Section::Appearance | Section::Layout | Section::Clock | Section::Behavior
+            Section::Appearance
+                | Section::Background
+                | Section::Layout
+                | Section::Clock
+                | Section::Behavior
         )
+    }
+}
+
+/// 背景那几项的快照：既用来判断"改了没有"，也记下"已经落库的是哪一版"。
+///
+/// 只比这五项、而不是整个 `Settings`：背景是"看着调"的东西——传完图、点完选图、
+/// 拖完遮罩就该当场看到结果，为一个动作再点一次「保存设置」是多余的。
+/// 主题、间距那些偏好不在此列，仍然手动保存。
+#[derive(Clone, PartialEq)]
+struct BackgroundSnapshot {
+    preset: String,
+    urls: Vec<String>,
+    url: String,
+    dim: i64,
+    random: bool,
+}
+
+impl BackgroundSnapshot {
+    fn of(settings: &Settings) -> Self {
+        Self {
+            preset: settings.background_preset.clone(),
+            urls: settings.background_urls.clone(),
+            url: settings.background_url.clone(),
+            dim: settings.background_dim,
+            random: settings.background_random,
+        }
     }
 }
 
@@ -103,6 +135,54 @@ pub fn SettingsPanel(
     let mut wallpaper_msg = use_signal(|| Option::<String>::None);
     let mut clearing_icons = use_signal(|| false);
     let mut icon_clear_msg = use_signal(|| Option::<String>::None);
+
+    // 已经落库的那一版背景。初值就是面板打开时服务端给的那份。
+    let mut bg_saved = use_signal(|| BackgroundSnapshot::of(&settings));
+    // "已经有一个存盘循环在跑"的标记。只读 `peek`（不订阅），所以它自己变来变去
+    // 不会把 effect 再勾起来跑一次。
+    let mut bg_saving = use_signal(|| false);
+
+    // 背景的改动即时生效，不必再点一次「保存设置」：上传、选图、移出是"动作"，
+    // 遮罩与轮换开关是"看着调"的旋钮，都该当场看到结果。
+    //
+    // 拖遮罩滑块会连发 input 事件，所以由一个循环合并处理：睡一小会儿，看草稿与
+    // 已落库的那版还差就存一次，循环到两者一致为止。循环期间新的改动会被它下一轮
+    // 捡走，effect 那边直接让路。
+    use_effect(move || {
+        if BackgroundSnapshot::of(&draft()) == bg_saved() || *bg_saving.peek() {
+            return;
+        }
+
+        bg_saving.set(true);
+        spawn(async move {
+            loop {
+                #[cfg(feature = "web")]
+                gloo_timers::future::TimeoutFuture::new(400).await;
+
+                let snapshot = BackgroundSnapshot::of(&draft());
+                if snapshot == bg_saved() {
+                    break;
+                }
+
+                match save_settings(draft()).await {
+                    Ok(()) => {
+                        bg_saved.set(snapshot);
+                        save_error.set(None);
+                        saved.set(true);
+                        // 首页那份设置要跟着刷新，背景才会当场换掉
+                        on_settings_saved.call(());
+                    }
+                    Err(e) => {
+                        save_error.set(Some(error_text(&e)));
+                        break;
+                    }
+                }
+            }
+
+            // 这里没有 await，改動不可能插进来（wasm 单线程），所以不会漏掉最后一次
+            bg_saving.set(false);
+        });
+    });
 
     let section = active();
 
@@ -233,54 +313,61 @@ pub fn SettingsPanel(
                                     }
                                 }
                             }
+                        }
+                    },
 
-                            div { class: "field",
-                                span { class: "field-label", "内置壁纸" }
-                                div { class: "segmented wrap",
+                    // ---------- 背景 ----------
+                    // 单开一节而不是挤在「外观」里：这里的东西（内置渐变 + 池 +
+                    // 遮罩 + 轮换开关）本来就比外观那一项多得多，池还需要整屏放缩略图。
+                    Section::Background => rsx! {
+                        p { class: "field-hint", "背景的改动即时生效，不用点下面的「保存设置」。" }
+
+                        section { class: "panel-section",
+                            h3 { class: "panel-heading", "内置渐变" }
+                            div { class: "segmented wrap",
+                                button {
+                                    class: if draft().background_preset.is_empty() { "segment active" } else { "segment" },
+                                    r#type: "button",
+                                    onclick: move |_| draft.with_mut(|s| s.background_preset = String::new()),
+                                    "默认"
+                                }
+                                for name in BACKGROUND_PRESETS {
                                     button {
-                                        class: if draft().background_preset.is_empty() { "segment active" } else { "segment" },
+                                        key: "{name}",
+                                        class: if draft().background_preset == name { "segment active" } else { "segment" },
                                         r#type: "button",
-                                        onclick: move |_| draft.with_mut(|s| s.background_preset = String::new()),
-                                        "默认"
-                                    }
-                                    for name in BACKGROUND_PRESETS {
-                                        button {
-                                            key: "{name}",
-                                            class: if draft().background_preset == name { "segment active" } else { "segment" },
-                                            r#type: "button",
-                                            title: "{name}",
-                                            onclick: move |_| draft.with_mut(|s| s.background_preset = name.to_string()),
-                                            div { class: "preset-swatch preset-{name}" }
-                                        }
+                                        title: "{name}",
+                                        onclick: move |_| draft.with_mut(|s| s.background_preset = name.to_string()),
+                                        div { class: "preset-swatch preset-{name}" }
                                     }
                                 }
-                                p { class: "field-hint",
-                                    "内置渐变不依赖外网，比外链图片可靠（外链可能限流或防盗链）。设置背景图后此项被忽略。"
-                                }
                             }
+                            p { class: "field-hint",
+                                "内置渐变不依赖外网，比外链图片可靠（外链可能限流或防盗链）。池里有背景时此项被忽略。"
+                            }
+                        }
 
-                            label { class: "field",
-                                span { class: "field-label", "背景图片地址" }
-                                input {
-                                    class: "input",
-                                    placeholder: "留空则使用上面的内置壁纸",
-                                    value: "{draft().background_url}",
-                                    oninput: move |e| draft.with_mut(|s| s.background_url = e.value()),
-                                }
-                            }
+                        BackgroundPanel {
+                            pool: draft().background_urls.clone(),
+                            current: draft().background_url.clone(),
+                            rotating: draft().background_random,
+                            on_pool: move |urls: Vec<String>| {
+                                draft.with_mut(|s| s.background_urls = urls);
+                                saved.set(false);
+                            },
+                            on_pick: move |url: String| {
+                                draft.with_mut(|s| s.background_url = url);
+                                saved.set(false);
+                            },
+                            on_message: move |msg: Option<String>| wallpaper_msg.set(msg),
+                        }
 
-                            WallpaperPanel {
-                                current: draft().background_url.clone(),
-                                on_pick: move |url: String| {
-                                    draft.with_mut(|s| s.background_url = url);
-                                    saved.set(false);
-                                },
-                                on_message: move |msg: Option<String>| wallpaper_msg.set(msg),
-                            }
+                        if let Some(msg) = wallpaper_msg() {
+                            p { class: "field-hint", "{msg}" }
+                        }
 
-                            if let Some(msg) = wallpaper_msg() {
-                                p { class: "field-hint", "{msg}" }
-                            }
+                        section { class: "panel-section",
+                            h3 { class: "panel-heading", "显示" }
 
                             label { class: "field",
                                 span { class: "field-label", "亮度遮罩　{draft().background_dim}%" }
@@ -306,8 +393,9 @@ pub fn SettingsPanel(
                                 span { "每次打开换一张" }
                             }
                             p { class: "field-hint",
-                                "适用于随机图接口。图片接口通常返回很长的缓存头（如 30 天），而地址又不变，"
-                                "不勾选的话浏览器会一直用同一张缓存图；勾选后每次打开会在地址后追加一个随机参数。"
+                                "池里有两张以上：每次打开随机挑一张（两次抽到同一张是可能的）。只有一张"
+                                "（或池是空的、只填了一条地址）没有可换的：改为给地址追加一个随机参数——"
+                                "图片接口通常返回 30 天缓存头而地址又不变，不加参数的话浏览器会一直用同一张缓存图。"
                             }
                         }
                     },

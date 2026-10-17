@@ -998,17 +998,33 @@ pub async fn get_settings() -> Result<Settings, ServerFnError> {
 #[server]
 pub async fn save_settings(input: Settings) -> Result<(), ServerFnError> {
     use crate::db;
+    use crate::models::is_allowed_background;
 
-    let background_url = input.background_url.trim().to_string();
-    let allowed = background_url.is_empty()
-        || background_url.starts_with("http://")
-        || background_url.starts_with("https://")
-        || background_url.starts_with('/');
-    if !allowed {
+    let mut input = input;
+
+    // 手填的那条地址（池还空着时就靠它）照旧要过形状校验。
+    // 池本身在下面逐行校验——非法行要报出来，不能静默丢掉。
+    let url = input.background_url.trim().to_string();
+    if !url.is_empty() && !is_allowed_background(&url) {
         return Err(ServerFnError::new(
             "背景图片地址需以 http:// 、https:// 或 / 开头",
         ));
     }
+    for line in &input.background_urls {
+        let line = line.trim();
+        if !line.is_empty() && !is_allowed_background(line) {
+            let shown: String = line.chars().take(60).collect();
+            return Err(ServerFnError::new(format!(
+                "背景池里的地址需以 http:// 、https:// 或 / 开头：{shown}"
+            )));
+        }
+    }
+
+    // 当前地址必须落在池里（池为空时它就是手填的那条）。`to_pairs` 落库前
+    // 还会再收敛一次，这里先归一是为了让校验看到的就是最终形态。
+    let (pool, current) = input.normalized_background();
+    input.background_urls = pool;
+    input.background_url = current;
 
     let mut tx = db::pool()
         .begin()
@@ -1033,6 +1049,30 @@ pub async fn save_settings(input: Settings) -> Result<(), ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("提交设置失败: {e}")))?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 背景壁纸
+// ---------------------------------------------------------------------------
+
+/// 把外链图片「存到本地」：服务端抓一次，落进 `WALLPAPER_DIR`，返回新的访问地址。
+///
+/// 为什么要绕服务端而不是让浏览器下载：抓取要避开防盗链（服务端请求带 UA、
+/// 不带页面的 Referer，往往比 img 更容易拿到图），落盘也只有服务端能做。
+/// 走 server function 而不是新开一条路由：输入输出都是 JSON，正是它的形状；
+/// `POST /wallpaper` 那条原始字节路由是给上传用的，两者不混。
+#[server]
+pub async fn save_wallpaper_from_url(url: String) -> Result<String, ServerFnError> {
+    let url = url.trim().to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ServerFnError::new(
+            "只有 http:// 或 https:// 开头的图片地址才需要存到本地",
+        ));
+    }
+
+    crate::wallpaper::save_from_url(&url)
+        .await
+        .map_err(ServerFnError::new)
 }
 
 // ---------------------------------------------------------------------------

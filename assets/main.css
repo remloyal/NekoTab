@@ -1953,10 +1953,14 @@ select.input {
     white-space: nowrap;
 }
 
-/* ---------- 壁纸列表 ---------- */
+/* ---------- 背景池 ---------- */
+/* 池里两类条目混在一起：外链地址与本机上传，卡片长得一样，动作各差一个
+   （外链多「存本地」，本机多「删除」）。 */
 .wallpaper-list {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    /* 一列要放得下两个动作按钮（最长的组合是"设为当前 + 存本地"），
+       否则四个动作会各占一行，卡片被拉得老长 */
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
     gap: 8px;
     margin-top: 10px;
 }
@@ -1976,6 +1980,17 @@ select.input {
     background: var(--accent-soft);
 }
 
+.wallpaper-thumb-box {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 56px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: var(--field-bg);
+}
+
 .wallpaper-thumb {
     width: 100%;
     height: 56px;
@@ -1984,16 +1999,58 @@ select.input {
     background: var(--field-bg);
 }
 
+/* 取不到的缩略图换一行字：不然网格里只剩浏览器的碎图图标，
+   看不出是这条地址坏了还是面板坏了 */
+.wallpaper-thumb-broken {
+    padding: 2px 6px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+}
+
+.wallpaper-name {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.wallpaper-item.active .wallpaper-name {
+    color: var(--text);
+}
+
 .wallpaper-actions {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    flex-wrap: wrap;
     gap: 4px;
 }
 
 .wallpaper-actions .icon-btn {
     padding: 2px 6px;
     font-size: 11.5px;
+}
+
+/* 本机有、但不在池里的那些（旧版本上传的、手动丢进目录的、被移出池的）。
+   没有这条兜底条带，它们会从界面上消失、删不掉，而壁纸目录不参与自动清理。 */
+.local-files {
+    margin-top: 10px;
+}
+
+.local-files-head {
+    padding: 4px 0;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    background: none;
+    border: none;
+    cursor: pointer;
+}
+
+.local-files-head:hover {
+    color: var(--text);
 }
 
 /* ---------- 快捷添加（书签小工具 + 令牌） ---------- */

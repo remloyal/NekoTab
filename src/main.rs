@@ -192,6 +192,16 @@ fn main() {
                 // 取舍），抬到 6 多花的 CPU 可忽略；gzip 默认本来就是 6，不受影响。
                 .layer(tower_http::compression::CompressionLayer::new().quality(
                     tower_http::compression::CompressionLevel::Precise(6),
+                ))
+                // 请求体上限。axum 默认只收 2 MB，而壁纸单张就能到 16 MB——不放开的话，
+                // 稍大的图在读请求体时就被 413 掉，而且连接是**中途掐断**的，浏览器侧
+                // 只看到一句 "TypeError: Failed to fetch"（拿不到我们写的那句提示）。
+                // 书签导入传的是整份备份文本，同样吃这个上限。
+                //
+                // 放在最后：`Router::layer` 作用于此前注册的全部路由，dioxus 的
+                // server function 路由（/api/*）因此也在内，不只是 /wallpaper。
+                .layer(dioxus::server::axum::extract::DefaultBodyLimit::max(
+                    wallpaper::MAX_WALLPAPER_BYTES,
                 ));
 
             Ok(router)

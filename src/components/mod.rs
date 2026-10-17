@@ -1,3 +1,4 @@
+mod background_panel;
 mod batch;
 mod card;
 mod clock;
@@ -17,7 +18,6 @@ mod quote;
 mod search_bar;
 mod settings_panel;
 mod trash_panel;
-mod wallpaper_panel;
 
 // 卡片相关的东西都在 `card` 里（框 / 网格 / 正文 / 表单 / 选卡弹窗）。
 // 这里统一转出去，调用方不必知道它内部分了几个文件。

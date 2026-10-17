@@ -103,6 +103,34 @@ fn matches_keyword(bookmark: &Bookmark, query: &str) -> bool {
     })
 }
 
+/// 一段字符串的散列（FNV-1a，与壁纸取文件名用的是同一个常数）。
+///
+/// 只用来把 nonce 摊到背景池的下标上，不需要任何密码学强度。
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+fn hash_str(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash = (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// 背景池这次轮到第几条；`None` 表示不该轮换（池里不足两条）。
+///
+/// 用 nonce 取下标而不是用随机数：同一次页面加载里组件会重渲染很多次，
+/// 每次都得算出同一张，否则界面一动背景就换。nonce 每次打开都不同，
+/// 随机性照样有——代价是池里只有两张时，有 1/2 的概率连着两次给同一张。
+/// 要去掉这个概率就得记点状态（localStorage 或服务端游标），本应用不留任何
+/// 这类痕迹：新标签页不该往浏览器里写东西。
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+fn rotation_index(pool: &[String], nonce: &str) -> Option<usize> {
+    if pool.len() < 2 {
+        return None;
+    }
+
+    Some((hash_str(nonce) % pool.len() as u64) as usize)
+}
+
 /// 按分组过滤值统计条数，键与标签页的 `value` 一致。
 fn count_by_group(items: &[Bookmark], known: &HashSet<i64>) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -291,15 +319,47 @@ pub fn Home() -> Element {
     let is_selecting = selecting();
 
     // ---- 背景 ----
-    // 随机模式用的一次性参数：每次打开页面生成一个，用来绕开图片接口的长缓存。
-    // 只在客户端生成——SSR 阶段设置本就还没加载，两边都是"空"，因此不会
-    // hydration 失配。
+    // 这次显示哪张，由下面那个 effect 定，渲染只读结果。为什么不在渲染里算：
+    // 随机源只在客户端存在，而渲染在 SSR 也得跑一遍——那时按"设置里选中的那条"
+    // 渲染即可（两边都是"空"，不会 hydration 失配）。
+    #[cfg_attr(feature = "server", allow(unused_mut))]
+    let mut bg_picked = use_signal(|| Option::<String>::None);
+
+    // 每次打开页面生成一个时间戳：既给外链当"绕开长缓存"的随机参数，
+    // 也当背景池轮换的随机源。只在客户端生成（见上）。
     #[cfg_attr(feature = "server", allow(unused_mut))]
     let mut bg_nonce = use_signal(String::new);
     use_effect(move || {
         #[cfg(feature = "web")]
-        if bg_nonce().is_empty() {
-            bg_nonce.set((js_sys::Date::now() as u64).to_string());
+        {
+            if bg_nonce().is_empty() {
+                bg_nonce.set((js_sys::Date::now() as u64).to_string());
+            }
+
+            // 读资源而不是用上面那份快照：设置可能晚于挂载才到位，
+            // 这里顺带订上，到了会再跑一次
+            let fresh = match (&*settings_res.read()).clone() {
+                Some(Ok(found)) => found,
+                Some(Err(_)) => Settings::default(),
+                None => match (&*initial_settings.read()).clone() {
+                    Some(Ok(found)) => found,
+                    _ => return,
+                },
+            };
+
+            let nonce = bg_nonce();
+            let picked = match (fresh.background_random && !nonce.is_empty())
+                .then(|| rotation_index(&fresh.background_urls, &nonce))
+                .flatten()
+            {
+                Some(index) => fresh.background_urls[index].clone(),
+                None => fresh.background_url.clone(),
+            };
+
+            // peek：不要订阅自己写的信号
+            if *bg_picked.peek() != Some(picked.clone()) {
+                bg_picked.set(Some(picked));
+            }
         }
     });
 
@@ -336,7 +396,11 @@ pub fn Home() -> Element {
         }
     });
 
-    let has_wallpaper = !settings.background_url.is_empty();
+    // 轮换的结果还没送到（SSR、或随机参数未就绪）时用设置里选中的那条：
+    // 它在"随机开着但池不足两条"时就是最终要显示的那张。
+    let picked = bg_picked().unwrap_or_else(|| settings.background_url.clone());
+
+    let has_wallpaper = !picked.is_empty();
     let nonce = bg_nonce();
     let wallpaper_ready = has_wallpaper && (!settings.background_random || !nonce.is_empty());
     // 壁纸层。地址为空（或随机参数还没就绪）时显式写 none：
@@ -345,8 +409,10 @@ pub fn Home() -> Element {
     // 属性始终有值，没有需要补回来的东西。
     let bg_style = if wallpaper_ready {
         // 括号、引号、分号会破坏 url("…") 的写法，直接抹掉
-        let mut url = settings.background_url.replace(['"', '\'', ';', '\\'], "");
-        if settings.background_random {
+        let mut url = picked.replace(['"', '\'', ';', '\\'], "");
+        // 追加随机参数只为绕开图片接口的长缓存。本机的 `/wallpaper/xxx` 内容不会变、
+        // 响应本来就带 immutable 长缓存，再追加只是白下一次请求——所以只加在外链上。
+        if settings.background_random && url.starts_with("http") {
             let sep = if url.contains('?') { '&' } else { '?' };
             url = format!("{url}{sep}_={nonce}");
         }
@@ -1070,6 +1136,40 @@ pub fn Home() -> Element {
 mod tests {
     use super::*;
     use crate::models::Bookmark;
+
+    /// 池里不足两条就不轮换（`None` 让调用方退回"设置里选中的那条"）。
+    #[test]
+    fn rotation_needs_at_least_two_entries() {
+        let one = vec!["https://a.test/1.jpg".to_string()];
+        assert_eq!(rotation_index(&one, "1792163779698"), None);
+        assert_eq!(rotation_index(&[], "1792163779698"), None);
+
+        let two = vec![
+            "https://a.test/1.jpg".to_string(),
+            "https://a.test/2.jpg".to_string(),
+        ];
+        assert!(rotation_index(&two, "1792163779698").is_some());
+    }
+
+    /// 下标始终落在池内，且同一次加载（同一个 nonce）算出来必须一样——
+    /// 组件会重渲染很多次，每次都得是同一张。
+    #[test]
+    fn rotation_is_stable_per_nonce_and_in_range() {
+        let pool: Vec<String> = (0..5).map(|i| format!("https://a.test/{i}.jpg")).collect();
+
+        for nonce in ["1", "2", "1792163779698", "1792163781242", "乱写"] {
+            let first = rotation_index(&pool, nonce);
+            assert_eq!(first, rotation_index(&pool, nonce), "同一 nonce 必须稳定");
+            assert!(first.unwrap() < pool.len(), "下标不能越界");
+        }
+
+        // 不同 nonce 会落到不同的条目上（不要求"必然不同"，但也不能永远同一张）
+        let picks: std::collections::HashSet<Option<usize>> = ["1", "2", "3", "4", "5", "6"]
+            .iter()
+            .map(|nonce| rotation_index(&pool, nonce))
+            .collect();
+        assert!(picks.len() > 1, "十个 nonce 全落到同一条上，说明散列没起作用");
+    }
 
     fn bookmark(id: i64, title: &str, url: &str, description: &str, tags: &str) -> Bookmark {
         Bookmark {

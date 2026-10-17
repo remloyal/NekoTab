@@ -451,6 +451,58 @@ pub struct Quote {
 pub const BACKGROUND_PRESETS: [&str; 6] =
     ["aurora", "nebula", "forest", "ocean", "sunset", "mono"];
 
+/// 背景池最多存几条。
+///
+/// 有上限是为了让面板能一眼扫完，也为了控制体积：`Settings` 会随首屏直出进
+/// hydration 载荷，让一个键无限膨胀不合适。
+pub const BACKGROUND_POOL_MAX: usize = 30;
+
+/// 背景池里单条地址的长度上限。
+pub const BACKGROUND_URL_MAX: usize = 2048;
+
+/// 一个地址能不能当背景用。
+///
+/// 三种形状之外一律不收：`http://` / `https://`（外链，也可能是随机图接口）、
+/// `/`（本站路径，本地上传的壁纸就是 `/wallpaper/xxxx.png`）。空串是合法的
+/// "没设"，由调用方决定怎么解释。
+pub fn is_allowed_background(url: &str) -> bool {
+    let url = url.trim();
+    url.is_empty()
+        || url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with('/')
+}
+
+/// 把一串候选地址收敛成可信的背景池：逐行 trim、丢空行、丢非法行与超长行、
+/// 按字符串去重、截到 [`BACKGROUND_POOL_MAX`]。
+///
+/// 与 `to_pairs` 那套"取值范围在落库前夹好"是同一职责，所以读（老库）与写
+/// （保存）都走它，两条路径不会漂移。做了过滤而不是报错：真走到这一步说明
+/// 界面那道校验漏了，静默丢掉总比让整次保存失败好。
+pub fn normalize_pool<I, S>(urls: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut pool: Vec<String> = Vec::new();
+
+    for raw in urls {
+        let url = raw.as_ref().trim();
+        if url.is_empty() || !is_allowed_background(url) || url.len() > BACKGROUND_URL_MAX {
+            continue;
+        }
+        if pool.iter().any(|known| known == url) {
+            continue;
+        }
+        if pool.len() >= BACKGROUND_POOL_MAX {
+            break;
+        }
+        pool.push(url.to_string());
+    }
+
+    pool
+}
+
 /// 主题：跟随系统 / 深色 / 浅色。
 pub const THEMES: [&str; 3] = ["system", "dark", "light"];
 
@@ -503,8 +555,17 @@ pub fn columns_for(width: f64, tile_size: i64, gap_x: i64) -> usize {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     // ---- 外观 ----
-    /// 背景图片地址；空字符串表示用内置渐变（`background_preset` 或默认渐变）
+    /// 背景图片地址；空字符串表示用内置渐变（`background_preset` 或默认渐变）。
+    ///
+    /// 它是"**当前生效的那一条**"，背景池非空时必定是池里的一条（见
+    /// [`Self::normalize_background`]）——渲染只看它，轮换选谁也只改它。
     pub background_url: String,
+    /// 背景池：一行一个地址，既可以是外链 `https://…`，也可以是本地上传的
+    /// `/wallpaper/xxxx.png`。
+    ///
+    /// "有哪些背景"以池为准，"这次用哪张"看 `background_url`。分成两个字段而不是
+    /// 一个列表 + 下标：下标会在增删条目时整体错位，而地址字符串是稳定的。
+    pub background_urls: Vec<String>,
     /// 背景图亮度遮罩百分比，0-80，越大越暗；仅在设了背景图时生效
     pub background_dim: i64,
     /// 每次打开页面换一张：给背景地址追加随机参数，绕开图片接口的长缓存
@@ -555,6 +616,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             background_url: String::new(),
+            background_urls: Vec::new(),
             background_dim: 35,
             background_random: false,
             background_preset: String::new(),
@@ -641,6 +703,7 @@ impl Settings {
         for (key, value) in pairs {
             match key.as_str() {
                 "background_url" => settings.background_url = value,
+                "background_urls" => settings.background_urls = normalize_pool(value.split('\n')),
                 "background_dim" => settings.background_dim = clamp_int(&value, 35, 0, 80),
                 "background_random" => settings.background_random = parse_bool(&value),
                 "background_preset" => {
@@ -671,13 +734,49 @@ impl Settings {
             }
         }
 
+        // 池与当前地址是一对，读完一起收敛（老库只有 `background_url`，见
+        // `normalized_background` 的说明）
+        let (pool, url) = settings.normalized_background();
+        settings.background_urls = pool;
+        settings.background_url = url;
         settings
+    }
+
+    /// 背景归一：一次性算出"可信的池 + 当前地址"。
+    ///
+    /// * 池：逐行去空、去非法、去重、截到上限（[`normalize_pool`]）；
+    /// * 池为空而 `background_url` 非空 → 把那条当成池里唯一的一条。老库里只有
+    ///   这一个字段，这样"有哪些背景"始终只有池一个出处，而用户打开设置就能看见
+    ///   自己那张图、也能顺势加别的——纯函数、幂等，不必为一个字段写迁移；
+    /// * 池非空 → `background_url` 必是池里的一条，不在池里就取池首，免得留下
+    ///   "既不在池里、界面上也看不见，却实际生效"的背景。
+    ///
+    /// 读（`from_pairs`）与写（`to_pairs`）都走它，两条路径不会漂移。
+    pub fn normalized_background(&self) -> (Vec<String>, String) {
+        let mut pool = normalize_pool(&self.background_urls);
+        let url = self.background_url.trim().to_string();
+
+        if pool.is_empty() && !url.is_empty() {
+            pool = normalize_pool(std::slice::from_ref(&self.background_url));
+        }
+
+        let url = if pool.is_empty() || pool.iter().any(|known| *known == url) {
+            url
+        } else {
+            pool[0].clone()
+        };
+
+        (pool, url)
     }
 
     /// 展开为逐键写入用的键值对。取值范围在这里已经夹好，落库即是可信值。
     pub fn to_pairs(&self) -> Vec<(&'static str, String)> {
+        // 背景的那两项要一起收敛（池去非法行、当前地址收进池内），先算出来
+        let (pool, background_url) = self.normalized_background();
+
         vec![
-            ("background_url", self.background_url.trim().to_string()),
+            ("background_url", background_url),
+            ("background_urls", pool.join("\n")),
             ("background_dim", self.background_dim.clamp(0, 80).to_string()),
             ("background_random", bool_str(self.background_random)),
             (
@@ -806,6 +905,10 @@ mod tests {
     fn settings_round_trip_is_stable() {
         let original = Settings {
             background_url: "https://example.com/a.jpg".to_string(),
+            background_urls: vec![
+                "https://example.com/a.jpg".to_string(),
+                "/wallpaper/deadbeef.png".to_string(),
+            ],
             background_dim: 55,
             background_random: true,
             background_preset: "forest".to_string(),
@@ -834,6 +937,83 @@ mod tests {
             .collect();
 
         assert_eq!(Settings::from_pairs(pairs), original);
+    }
+
+    /// 池读进来就收敛：去空行、去非法形状、去重、保序。
+    #[test]
+    fn pool_is_normalized_on_read() {
+        let settings = Settings::from_pairs(vec![(
+            "background_urls".to_string(),
+            " https://a.test/1.jpg \n\njavascript:alert(1)\n/wallpaper/deadbeef.png\n\
+             https://a.test/1.jpg \nftp://x/y.png"
+                .to_string(),
+        )]);
+
+        assert_eq!(
+            settings.background_urls,
+            vec![
+                "https://a.test/1.jpg".to_string(),
+                "/wallpaper/deadbeef.png".to_string(),
+            ]
+        );
+    }
+
+    /// 老库里只有一条 `background_url`：读出来就是池里唯一的一条，
+    /// 而当前地址仍是它——"有哪些背景"从此只有池一个出处。
+    #[test]
+    fn legacy_single_url_becomes_the_pool() {
+        let settings = Settings::from_pairs(vec![(
+            "background_url".to_string(),
+            "https://a.test/only.jpg".to_string(),
+        )]);
+
+        assert_eq!(settings.background_urls, vec!["https://a.test/only.jpg"]);
+        assert_eq!(settings.background_url, "https://a.test/only.jpg");
+    }
+
+    /// 池非空时，当前地址必须落在池里；不在（或压根没设）就取池首。
+    /// 否则会留下一张既不在池里、面板上也看不见，却实际生效的背景。
+    #[test]
+    fn current_background_is_pulled_into_the_pool() {
+        let mut settings = Settings::default();
+        settings.background_urls = vec![
+            "https://a.test/1.jpg".to_string(),
+            "https://a.test/2.jpg".to_string(),
+        ];
+
+        // 没设当前地址 → 池首
+        assert_eq!(
+            settings.normalized_background().1,
+            "https://a.test/1.jpg"
+        );
+
+        // 设了一条不在池里的 → 也是池首
+        settings.background_url = "https://a.test/ghost.jpg".to_string();
+        assert_eq!(
+            settings.normalized_background().1,
+            "https://a.test/1.jpg"
+        );
+
+        // 池里有的照原样保留
+        settings.background_url = "https://a.test/2.jpg".to_string();
+        assert_eq!(
+            settings.normalized_background().1,
+            "https://a.test/2.jpg"
+        );
+    }
+
+    /// 池有条数上限，超出的截掉；单条超长的直接丢。
+    #[test]
+    fn pool_is_capped() {
+        let many: Vec<String> = (0..BACKGROUND_POOL_MAX + 5)
+            .map(|i| format!("https://a.test/{i}.jpg"))
+            .collect();
+        let pool = normalize_pool(&many);
+        assert_eq!(pool.len(), BACKGROUND_POOL_MAX);
+        assert_eq!(pool[0], "https://a.test/0.jpg");
+
+        let long = format!("https://a.test/{}", "x".repeat(BACKGROUND_URL_MAX));
+        assert!(normalize_pool([long.as_str()]).is_empty(), "超长地址不收");
     }
 
     #[test]

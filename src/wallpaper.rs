@@ -139,24 +139,122 @@ mod server {
 
     use super::{extension_for, is_allowed, new_file_name, path_of, wallpaper_dir, MAX_WALLPAPER_BYTES};
 
+    /// 抓外链图片时用的 UA。与 `favicon` 那处同一个理由：有些站点对没有 UA
+    /// 的请求直接拒绝，而我们对它来说和浏览器没区别。
+    const USER_AGENT: &str =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+    /// `GET /wallpaper` 的一项：文件名 + 体积。
+    ///
+    /// 体积是给面板显示"本机 5 张 · 62 MB"用的——壁纸不参与任何自动清理，
+    /// 要不要删只能靠看得见占用来判断。
+    #[derive(serde::Serialize)]
+    pub struct WallpaperEntry {
+        pub name: String,
+        pub bytes: u64,
+    }
+
     /// `GET /wallpaper`：列出已有壁纸（按文件名倒序，新的在前）。
     pub async fn list_handler() -> Response {
-        let mut names: Vec<String> = Vec::new();
+        let mut items: Vec<WallpaperEntry> = Vec::new();
 
         if let Ok(mut entries) = tokio::fs::read_dir(wallpaper_dir()).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Some(name) = entry.file_name().to_str() {
-                    if super::is_safe_name(name) {
-                        names.push(name.to_string());
-                    }
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                if !super::is_safe_name(&name) {
+                    continue;
                 }
+                // 取不到体积（正好被删、没权限）记 0：宁可显示"一张 0 字节"，
+                // 也不要让它从列表里整条消失
+                let bytes = entry.metadata().await.map(|meta| meta.len()).unwrap_or(0);
+                items.push(WallpaperEntry { name, bytes });
             }
         }
 
-        names.sort_unstable();
-        names.reverse();
+        items.sort_by(|a, b| b.name.cmp(&a.name));
 
-        Json(names).into_response()
+        Json(items).into_response()
+    }
+
+    /// 把一份图片字节落进壁纸目录，返回它的访问地址（`/wallpaper/<name>`）。
+    ///
+    /// 上传（字节来自请求体）与「存到本地」（字节来自别人的服务器）共用这一处：
+    /// 两者的差别只在字节从哪来，命名、落盘、错误文案都该一致。
+    async fn store(data: Vec<u8>, extension: &str) -> Result<String, String> {
+        let name = new_file_name(extension);
+        let path = path_of(&name).ok_or_else(|| "生成文件名失败".to_string())?;
+
+        let write = tokio::task::spawn_blocking(move || std::fs::write(&path, &data)).await;
+        if !matches!(write, Ok(Ok(()))) {
+            return Err("写入壁纸失败".to_string());
+        }
+
+        Ok(format!("/wallpaper/{name}"))
+    }
+
+    /// 抓一张外链图片存到本机（背景池里的「存到本地」）。
+    ///
+    /// 与 `favicon` 那套代取同源：服务端去拿、带 UA、只有确认是图片才收。两处不同：
+    ///   * 体积上限按壁纸算（16 MB），而且**边读边卡**——图标是"全读进内存再看大小"，
+    ///     壁纸按那个写法，一个几百 MB 的响应就能把服务打爆；
+    ///   * 失败要给出可读原因（超时 / 不是图片 / 超限 / HTTP 状态），它会被摆到界面上。
+    pub async fn save_from_url(url: &str) -> Result<String, String> {
+        let mut response = crate::backend::http_client()
+            .get(url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    "请求超时".to_string()
+                } else if e.is_connect() {
+                    "连不上对方站点".to_string()
+                } else {
+                    format!("请求失败: {e}")
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("对方返回 HTTP {status}"));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if !content_type.starts_with("image/") {
+            // 有站点对任意路径都返回 200 + text/html（图标那边实测过），
+            // 不校验就会把一整个网页存成壁纸
+            return Err(format!("不是图片（{content_type}）"));
+        }
+
+        let Some(extension) = extension_for(&content_type) else {
+            return Err(format!("不支持的图片格式（{content_type}）"));
+        };
+
+        let mut data: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("读取响应失败: {e}"))?
+        {
+            if data.len() + chunk.len() > MAX_WALLPAPER_BYTES {
+                return Err("图片过大（上限 16 MB）".to_string());
+            }
+            data.extend_from_slice(&chunk);
+        }
+
+        if data.is_empty() {
+            return Err("响应为空".to_string());
+        }
+
+        store(data, extension).await
     }
 
     /// `POST /wallpaper`：请求体是图片字节，`Content-Type` 给出类型。
@@ -183,18 +281,10 @@ mod server {
             return error(StatusCode::PAYLOAD_TOO_LARGE, "图片过大（上限 16 MB）");
         }
 
-        let name = new_file_name(extension);
-        let Some(path) = path_of(&name) else {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "生成文件名失败");
-        };
-
-        let data = body.to_vec();
-        let write = tokio::task::spawn_blocking(move || std::fs::write(&path, &data)).await;
-        if !matches!(write, Ok(Ok(()))) {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "写入壁纸失败");
+        match store(body.to_vec(), extension).await {
+            Ok(url) => Json(serde_json::json!({ "url": url })).into_response(),
+            Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
         }
-
-        Json(serde_json::json!({ "url": format!("/wallpaper/{name}") })).into_response()
     }
 
     /// `DELETE /wallpaper/{name}`：删除一张壁纸。
@@ -251,7 +341,7 @@ mod server {
 }
 
 #[cfg(feature = "server")]
-pub use server::{delete_handler, list_handler, serve_handler, upload_handler};
+pub use server::{delete_handler, list_handler, save_from_url, serve_handler, upload_handler};
 
 #[cfg(test)]
 mod tests {
