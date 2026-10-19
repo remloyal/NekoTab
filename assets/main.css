@@ -27,12 +27,14 @@
     --card-panel: rgba(24, 28, 38, 0.62);
     --card-line: rgba(255, 255, 255, 0.1);
 
-    /* 由 home.rs 按设置覆盖：卡片尺寸、间距、列模板、每行最大列数换算的宽度上限 */
+    /* 由 home.rs 按设置覆盖：卡片尺寸、间距、列模板、每行最大列数换算的
+       网格宽度上限，以及能放下这些列的外层宽度上限 */
     --tile-size: 96px;
     --tile-gap-x: 8px;
     --tile-gap-y: 20px;
     --grid-template: repeat(auto-fit, 96px);
     --grid-max: none;
+    --stage-max: 940px;
 }
 
 /* 浅色主题：只换变量。作用域挂在 .stage-root 上（见 home.rs 的说明）。 */
@@ -603,7 +605,10 @@ body {
 /* ---------- 主体 ---------- */
 .stage {
     width: 100%;
-    max-width: 940px;
+    /* 默认 940px；设了每行最大列数后由 home.rs 放宽到放得下那些列
+       （否则这一列的上限会先把网格卡死，见 models::stage_max_width）。
+       窗口不够宽时 width: 100% 仍然优先，不会横向溢出。 */
+    max-width: var(--stage-max, 940px);
     display: flex;
     flex-direction: column;
     align-items: center;

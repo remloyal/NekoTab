@@ -438,14 +438,17 @@ pub fn Home() -> Element {
     // ---- 布局：卡片尺寸/间距/列数都用 CSS 变量下发 ----
     // 列数只封顶（--grid-max 是 max-width），轨道数本身始终自适应，
     // 所以窄屏放不下时会自动换行，而不是横向溢出。
+    // --stage-max 是外层那一列的上限：网格的 100% 取的是它，所以它必须放得下
+    // 设定的列数，否则 940px 会先把列数卡死在 9 列（见 models::stage_max_width）。
     let stage_style = format!(
         "--tile-size: {}px; --tile-gap-x: {}px; --tile-gap-y: {}px; \
-         --grid-template: {}; --grid-max: {};",
+         --grid-template: {}; --grid-max: {}; --stage-max: {};",
         settings.tile_size.clamp(56, 160),
         settings.tile_gap_x.clamp(0, 48),
         settings.tile_gap_y.clamp(0, 64),
         settings.grid_template_columns(),
         settings.grid_max_width(),
+        settings.stage_max_width(),
     );
 
     // ---- 网格实际列数 ----

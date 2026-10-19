@@ -644,6 +644,12 @@ impl Default for Settings {
     }
 }
 
+/// 卡区那一列（`.stage`）的基准宽度上限，单位 px。
+///
+/// 列数不限时页面就按这个宽度居中；设了每行最大列数后，这一列要跟着放宽到放得下
+/// 那些列（见 [`Settings::stage_max_width`]），否则它自己的上限会先一步把列数卡死。
+pub const STAGE_MAX_WIDTH: i64 = 940;
+
 impl Settings {
     /// 网格列模板：始终按卡片宽度自适应（`auto-fit`）。
     ///
@@ -669,6 +675,21 @@ impl Settings {
             self.tile_gap_x,
             self.grid_columns - 1
         )
+    }
+
+    /// 卡区那一列的最大宽度，供 `.stage` 的 `max-width` 使用。
+    ///
+    /// `.grid` 的 `width: 100%` 取的是这一列的**内容宽**，`max-width` 只能把它收窄、
+    /// 不能让它超出父级。所以父级必须自己也放得下 N 列，[`Self::grid_max_width`] 才
+    /// 真正生效；否则 940px 会先卡在 9 列，设置里 9 以上的值等于没设。
+    ///
+    /// 列数不限（`0`）时保持基准宽度 [`STAGE_MAX_WIDTH`]；有上限时取两者较大者——
+    /// 窗口不够宽时 `width: 100%` 仍然优先，不会横向溢出。
+    pub fn stage_max_width(&self) -> String {
+        if self.grid_columns <= 0 {
+            return format!("{STAGE_MAX_WIDTH}px");
+        }
+        format!("max({STAGE_MAX_WIDTH}px, {})", self.grid_max_width())
     }
 
     /// 把主题设置落到具体的一档（`"dark"` / `"light"`）。
@@ -1078,6 +1099,7 @@ mod tests {
         let mut settings = Settings::default();
         assert_eq!(settings.grid_template_columns(), "repeat(auto-fit, 96px)");
         assert_eq!(settings.grid_max_width(), "none", "列数 0 表示不限，不加上限");
+        assert_eq!(settings.stage_max_width(), "940px", "列数不限时保持基准宽度");
 
         settings.grid_columns = 5;
         settings.tile_size = 80;
@@ -1085,6 +1107,12 @@ mod tests {
         // 列模板不随列数变——列数只在宽度上封顶，不写死轨道数
         assert_eq!(settings.grid_template_columns(), "repeat(auto-fit, 80px)");
         assert_eq!(settings.grid_max_width(), "calc(80px * 5 + 10px * 4)");
+        // 外层列宽取"基准宽度"与"放得下 N 列"的较大者：5 列只要 440px，
+        // 页面不该因此变窄，所以仍是 940px 起
+        assert_eq!(
+            settings.stage_max_width(),
+            "max(940px, calc(80px * 5 + 10px * 4))"
+        );
     }
 
     #[test]
