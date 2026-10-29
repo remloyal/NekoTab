@@ -21,6 +21,9 @@ name: nekotab
 #   * 监听地址变量是 IP 不是 HOST（由 dioxus-cli-config 读取），详见 README。
 #   * 宿主端口默认 8080，可用 NEKOTAB_PORT 覆盖；本机跑 dx serve 时它会占用 8080。
 #
+#   想用 GitHub 的镜像（CI 发布时同步推送）：
+#     image: ghcr.io/remloyal/nekotab:latest
+#
 #   想改成「用本机打包的产物构建镜像」（不经过 Docker Hub）：
 #     bash scripts/pack-linux.sh        # 产物在 dist/amd64（arm64 则是 dist/arm64）
 #     然后注释掉下面的 image，启用 build（context 按目标架构改）。

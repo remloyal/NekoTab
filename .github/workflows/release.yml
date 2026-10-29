@@ -1,0 +1,271 @@
+name: Release
+
+# 打标签即发布，例如：
+#   git tag -a v0.1.0 -m "NekoTab 0.1.0" && git push origin v0.1.0
+#
+# 做三件事：
+#   1. 构建 amd64 / arm64 的 Linux 产物（scripts/pack-linux.sh，x86 原生 + arm64 交叉）
+#   2. 用 Dockerfile.prebuilt 打成多架构镜像，推到 GHCR（可选再推 Docker Hub）
+#   3. 创建 GitHub Release，附上两个架构的 tar.gz 与 SHA256SUMS
+on:
+  push:
+    tags:
+      - "v*"
+
+# 发布需要写 Release 与收紧镜像。
+permissions:
+  contents: write
+  packages: write
+
+# 发布不并发取消：已经推了一半的镜像不应被中途终止。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.94"
+  DX_VERSION: "0.7.10"
+  # 产物放到仓库内，方便 rust-cache 命中；pack-linux.sh 会沿用这个值。
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  release:
+    name: 构建并发布 ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # secrets 不能在 if: 里直接用，先落到 env，再用 env.X != '' 判断。
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 生成「上一版本 → 本次」的对比链接需要标签历史。
+          fetch-depth: 0
+
+      # 防止「改了代码忘了改版本」：标签与 Cargo.toml 必须一致，
+      # 否则镜像 tag、Release 名称、版本号会各说各话。
+      - name: 校验版本
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::标签 $tag 与 Cargo.toml 的版本 $cargo_version 不一致：先改 Cargo.toml 并提交，再打标签。"
+            exit 1
+          fi
+
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # 预发布（带 -rc / -beta 之类）不动 latest，并在 Release 上标为 pre-release。
+          if [[ "$version" == *-* ]]; then
+            echo "SKIP_LATEST=1" >> "$GITHUB_ENV"
+          fi
+          echo "版本：$version"
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: 补上构建目标
+        run: |
+          rustup target add wasm32-unknown-unknown aarch64-unknown-linux-gnu
+
+      # dioxus-cli 自己也是个大依赖，编译一次约 5 分钟，缓存二进制即可。
+      - name: 恢复 dx 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/dx
+            ~/.dx
+          key: dx-${{ env.DX_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: 恢复编译缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev gcc-aarch64-linux-gnu
+          if ! command -v dx >/dev/null 2>&1; then
+            cargo install dioxus-cli --version "$DX_VERSION" --locked
+          fi
+          dx --version
+
+      # 先跑单测。release 构建立刻会用到同一批产物，不算额外开销。
+      - name: 单元测试
+        run: cargo test --locked --no-default-features --features server
+
+      # 客户端 wasm 只构建一次（与架构无关），两个架构的服务端二进制分别产出。
+      - name: 构建 amd64 / arm64 产物
+        run: bash scripts/pack-linux.sh x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            test -x "dist/$arch/server" || { echo "::error::dist/$arch/server 缺失"; exit 1; }
+            test -f "dist/$arch/public/index.html" || { echo "::error::dist/$arch/public 缺失"; exit 1; }
+            file "dist/$arch/server"
+          done
+
+      # arm64 镜像里的 apt-get 层需要模拟执行，Rust 编译本身是交叉编译、不走 QEMU。
+      - name: 准备 QEMU / buildx
+        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # 发布前先确认镜像真能起来，避免把坏镜像推成 latest。用 --tmpfs 挂 /data，
+      # 不在工作区留下 root 属主的 SQLite 文件。
+      - name: 冒烟测试运行镜像（amd64）
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/amd64 --provenance=false \
+            -f Dockerfile.prebuilt -t nekotab:smoke-amd64 --load dist/amd64
+          docker run -d --name nekotab-smoke-amd64 --platform linux/amd64 \
+            -p 18080:8080 --tmpfs /data nekotab:smoke-amd64
+
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18080/; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+
+          echo "--- 容器日志 ---"
+          docker logs nekotab-smoke-amd64 || true
+          docker rm -f nekotab-smoke-amd64 >/dev/null 2>&1 || true
+
+          if [ "$ok" != 1 ]; then
+            echo "::error::amd64 镜像启动后 30 秒内首页仍未返回 200"
+            exit 1
+          fi
+
+      # arm64 二进制是交叉编译出来的，光测 amd64 不够。这里借 QEMU 真跑一次，
+      # 能抓出 glibc 符号版本不匹配这类「编得过、跑不起来」的问题。
+      - name: 冒烟测试运行镜像（arm64，QEMU）
+        run: |
+          set -euo pipefail
+          docker buildx build --platform linux/arm64 --provenance=false \
+            -f Dockerfile.prebuilt -t nekotab:smoke-arm64 --load dist/arm64
+          docker run -d --name nekotab-smoke-arm64 --platform linux/arm64 \
+            -p 18081:8080 --tmpfs /data nekotab:smoke-arm64
+
+          ok=0
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:18081/; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+
+          echo "--- 容器日志 ---"
+          docker logs nekotab-smoke-arm64 || true
+          docker rm -f nekotab-smoke-arm64 >/dev/null 2>&1 || true
+
+          if [ "$ok" != 1 ]; then
+            echo "::error::arm64 镜像启动后 60 秒内首页仍未返回 200"
+            exit 1
+          fi
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR 的镜像名必须是全小写，而仓库名是 NekoTab。
+      - name: 计算镜像名
+        run: echo "GHCR_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: 推送镜像到 GHCR
+        run: IMAGE="$GHCR_IMAGE" SKIP_BUILD=1 bash scripts/publish.sh "$VERSION"
+
+      - name: 校验多架构 manifest
+        run: docker buildx imagetools inspect "$GHCR_IMAGE:$VERSION"
+
+      # Docker Hub 是可选的：没配 secrets 就跳过。镜像名固定为 <用户名>/nekotab，
+      # 要让 compose 默认值（remloyal001/nekotab）继续可用，用户名填 remloyal001。
+      - name: 登录 Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 推送镜像到 Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        run: IMAGE="${DOCKERHUB_USERNAME}/nekotab" SKIP_BUILD=1 bash scripts/publish.sh "$VERSION"
+
+      - name: 打包二进制产物
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for arch in amd64 arm64; do
+            tar -C "dist/${arch}" -czf "release-assets/nekotab-${VERSION}-linux-${arch}.tar.gz" .
+          done
+          cd release-assets
+          sha256sum ./*.tar.gz > SHA256SUMS
+          ls -lh
+
+      - name: 生成 Release 说明
+        run: |
+          set -euo pipefail
+          {
+            echo "## Docker 镜像"
+            echo
+            echo '```bash'
+            echo "docker pull ${GHCR_IMAGE}:${VERSION}"
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "docker pull ${DOCKERHUB_USERNAME}/nekotab:${VERSION}"
+            fi
+            echo '```'
+            echo
+            echo "## 二进制包"
+            echo
+            echo "解压后 \`server\` 与 \`public/\` 同级，设置环境变量后直接运行。"
+            echo
+            echo "- \`nekotab-${VERSION}-linux-amd64.tar.gz\`"
+            echo "- \`nekotab-${VERSION}-linux-arm64.tar.gz\`"
+            echo "- \`SHA256SUMS\` — 校验：\`sha256sum -c SHA256SUMS\`"
+            echo
+            prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+            if [ -n "$prev" ]; then
+              echo "**完整变更**：https://github.com/${GITHUB_REPOSITORY}/compare/${prev}...${GITHUB_REF_NAME}"
+            fi
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: NekoTab ${{ github.ref_name }}
+          body_path: release-notes.md
+          # 标签里带 - 的（如 v0.2.0-rc1）按预发布处理。
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/*.tar.gz
+            release-assets/SHA256SUMS
+
+      - name: 写入运行摘要
+        run: |
+          {
+            echo "### NekoTab ${VERSION} 已发布"
+            echo
+            echo "- GHCR：\`${GHCR_IMAGE}:${VERSION}\`"
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "- Docker Hub：\`${DOCKERHUB_USERNAME}/nekotab:${VERSION}\`"
+            fi
+            echo "- 二进制：linux-amd64 / linux-arm64 tar.gz + SHA256SUMS"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,6 +1,6 @@
 [package]
 name = "nekotab"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 rust-version = "1.85"
 description = "极简自部署书签导航（Dioxus 0.7 fullstack）"

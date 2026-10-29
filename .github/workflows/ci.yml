@@ -1,0 +1,48 @@
+name: CI
+
+# 平时（push 到 main / PR）跑一遍检查与单测。
+# 发布走 release.yml（打 v* 标签时触发），两者互不重叠。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 与 Dockerfile 里的 rust:1.94 保持一致；Cargo.lock 里最高的依赖 MSRV 是 1.89。
+  RUST_VERSION: "1.94"
+
+jobs:
+  check:
+    name: 检查与测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+
+      - name: 恢复编译缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ci
+
+      # 只做 check 不做完整 dx 构建：check 能覆盖类型与 cfg 分支错误，
+      # 完整产物由发布流程负责，避免每次 PR 都花十几分钟。
+      - name: 检查服务端
+        run: cargo check --locked --no-default-features --features server
+
+      - name: 检查客户端（wasm）
+        run: cargo check --locked --no-default-features --features web --target wasm32-unknown-unknown
+
+      - name: 单元测试
+        run: cargo test --locked --no-default-features --features server

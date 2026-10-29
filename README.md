@@ -1,5 +1,7 @@
 # NekoTab
 
+[![CI](https://github.com/remloyal/NekoTab/actions/workflows/ci.yml/badge.svg)](https://github.com/remloyal/NekoTab/actions/workflows/ci.yml)
+
 极简、可自部署的书签导航页，界面参照浏览器新标签页：大字时钟（带农历）+
 搜索引擎框 + 分类标签页 + 图标网格。
 
@@ -166,6 +168,9 @@
 ├── Cargo.toml
 ├── Dioxus.toml
 ├── Dockerfile                    # 多阶段构建
+├── .github/workflows/
+│   ├── ci.yml                    # push / PR：check + 单测
+│   └── release.yml               # 打 v* 标签：多架构镜像 + GitHub Release
 ├── .env.example
 ├── migrations/
 │   ├── 001_init.sql              # 基线：bookmarks / engines / settings / favicons
@@ -693,6 +698,61 @@ dioxus-cli` 并全量编译，是十几分钟量级；之后由 Docker 层缓存
 
 注意：服务端运行时会读取可执行文件同级的 `public/` 目录，因此镜像里要连同
 `public/` 一起拷贝，不能只拷二进制。
+
+## CI/CD 与发布
+
+仓库自带两条 GitHub Actions 工作流，都在 `.github/workflows/` 下。
+
+### 持续集成（`ci.yml`）
+
+push 到 `main` 和 PR 时触发（也可手动 `workflow_dispatch`）：
+
+- 服务端 `cargo check`
+- 客户端 `cargo check --target wasm32-unknown-unknown`
+- `cargo test`（服务端单测）
+
+工具链固定 1.94，与 `Dockerfile` 的 `rust:1.94` 对齐；依赖里最高的 MSRV 是 1.89。
+这里只做 check、不跑完整 `dx build`，把十几分钟的产物构建留给发布流程。
+`cargo fmt --check` 暂未纳入：现有代码没有按当前 rustfmt 格式化，直接加会让 CI 一上来
+就红；要强制的话先单独跑一遍 `cargo fmt`。
+
+### 发布（`release.yml`）
+
+**推一个 `v*` 标签就会发布**，版本号必须与 `Cargo.toml` 的 `version` 一致，
+否则工作流会在校验版本那一步直接失败：
+
+```bash
+# 先把 Cargo.toml 的 version 改成 0.2.0 并提交
+git tag -a v0.2.0 -m "NekoTab 0.2.0"
+git push origin v0.2.0
+```
+
+发布流程做的事：
+
+1. 用 `scripts/pack-linux.sh` 构建 **amd64 + arm64** 的 Linux 产物：客户端 wasm 只编
+   一次，服务端在 amd64 上原生编、在 arm64 上交叉编（装 `gcc-aarch64-linux-gnu`），
+   不走 QEMU 模拟编译。
+2. 用 `Dockerfile.prebuilt` 打成多架构镜像并推送：
+   - `ghcr.io/remloyal/nekotab`（用 `GITHUB_TOKEN`，无需额外配置）
+   - `remloyal001/nekotab`（**可选**，见下方 secrets）
+3. 推镜像前先用 amd64 镜像起一次容器、等首页返回 200，避免把坏镜像推成 `latest`。
+4. 创建 GitHub Release，附两个架构的 `nekotab-<版本>-linux-{amd64,arm64}.tar.gz`
+   和 `SHA256SUMS`。解压后 `server` 与 `public/` 同级，设置环境变量即可直接运行。
+
+镜像标签规则：`<版本>`（如 `0.2.0`）；非预发布同时更新 `latest`。
+标签里带 `-` 的（如 `v0.2.0-rc1`）按预发布处理：不碰 `latest`，Release 标为
+pre-release。
+
+**可选的 Docker Hub 推送。** 不配置就只发 GHCR。要用 Docker Hub，在仓库
+Settings → Secrets and variables → Actions 里加：
+
+| Secret | 内容 |
+| --- | --- |
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名（填 `remloyal001` 才能与 `docker-compose.yml` 的默认镜像一致） |
+| `DOCKERHUB_TOKEN` | Docker Hub 的 Access Token（不是登录密码） |
+
+**GHCR 的包默认是私有的。** 想让别人直接 `docker pull`，到 GitHub 个人/组织设置的
+Packages 里把 `nekotab` 的可见性改成 public。
 
 ## 已知限制
 
