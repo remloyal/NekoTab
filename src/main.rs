@@ -33,25 +33,26 @@ mod wallpaper;
 // 导入解析 / 导出序列化只在服务端进行，客户端只负责传文本与展示回执
 #[cfg(feature = "server")]
 mod transfer;
+// 热搜数据源：服务端代取、解析与十分钟缓存
+#[cfg(feature = "server")]
+mod hot;
+// 可选的整站访问密码：登录页 + Cookie 会话 + 守卫中间件
+#[cfg(feature = "server")]
+mod auth;
 
 use routes::Route;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
+/// 默认站点图标；`site_logo` 为空时由 Home 用它。
 const FAVICON_SVG: Asset = asset!("/assets/favicon.svg");
-
-/// 浏览器主题色（移动端地址栏）
-const THEME_COLOR: &str = "#0b0d13";
 
 #[component]
 fn App() -> Element {
     rsx! {
         document::Stylesheet { href: MAIN_CSS }
 
-        // 站点自身的图标。之前 head 里什么都没有，标签页显示的是浏览器默认图标。
-        document::Link { rel: "icon", r#type: "image/svg+xml", href: FAVICON_SVG.to_string() }
-        document::Meta { name: "theme-color", content: THEME_COLOR }
-        document::Meta { name: "description", content: "极简自部署书签导航" }
-
+        // 标题、描述、图标与主题色由 Home 按设置渲染（见 pages/home.rs）。
+        // 这里只保留样式表，避免 head 里出现两套 meta。
         Router::<Route> {}
     }
 }
@@ -133,6 +134,9 @@ fn main() {
                 .await
                 .expect("初始化数据库失败");
 
+            // 访问密码：未设置 ACCESS_PASSWORD 时整站不设防，行为与之前一致。
+            auth::init_from_env().await;
+
             // 图标字节写在磁盘上（`ICON_DIR`，默认 data/icon），库表只留元数据。
             // 建不出来也不致命：代取到的图标会直接回给浏览器，只是不落缓存。
             match favicon::init_icon_dir() {
@@ -180,6 +184,12 @@ fn main() {
                     dioxus::server::axum::routing::get(wallpaper::serve_handler)
                         .delete(wallpaper::delete_handler),
                 )
+                // 访问密码：登录页与退出。未启用密码时两者都直接回首页。
+                .route(
+                    "/login",
+                    dioxus::server::axum::routing::get(auth::login_page).post(auth::login_submit),
+                )
+                .route("/logout", dioxus::server::axum::routing::get(auth::logout))
                 // 响应压缩，gzip 与 brotli 都开。
                 //
                 // 静态产物（wasm / js / css）已在构建期压成 .br（见 Dioxus.toml 的
@@ -190,9 +200,10 @@ fn main() {
                 // 这里负责的是动态响应：SSR 的 HTML、server function 的 JSON。
                 // 质量显式设 6：tower-http 给实时 brotli 的默认是 4（沿用 nginx 的
                 // 取舍），抬到 6 多花的 CPU 可忽略；gzip 默认本来就是 6，不受影响。
-                .layer(tower_http::compression::CompressionLayer::new().quality(
-                    tower_http::compression::CompressionLevel::Precise(6),
-                ))
+                .layer(
+                    tower_http::compression::CompressionLayer::new()
+                        .quality(tower_http::compression::CompressionLevel::Precise(6)),
+                )
                 // 请求体上限。axum 默认只收 2 MB，而壁纸单张就能到 16 MB——不放开的话，
                 // 稍大的图在读请求体时就被 413 掉，而且连接是**中途掐断**的，浏览器侧
                 // 只看到一句 "TypeError: Failed to fetch"（拿不到我们写的那句提示）。
@@ -202,7 +213,11 @@ fn main() {
                 // server function 路由（/api/*）因此也在内，不只是 /wallpaper。
                 .layer(dioxus::server::axum::extract::DefaultBodyLimit::max(
                     wallpaper::MAX_WALLPAPER_BYTES,
-                ));
+                ))
+                // 访问密码守卫。放在最外层：页面、server function（/api/*）、导出、
+                // 图标与壁纸都在它后面；登录页、静态产物与带令牌的 /api/bookmark
+                // 在守卫里放行。未设置 ACCESS_PASSWORD 时它只做一次环境检查就放行。
+                .layer(dioxus::server::axum::middleware::from_fn(auth::guard));
 
             Ok(router)
         });

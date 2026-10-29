@@ -38,6 +38,7 @@ if (!file) {
 /// 设置面板的分区。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
+    Site,
     Appearance,
     Background,
     Layout,
@@ -50,7 +51,8 @@ enum Section {
 }
 
 /// `(分区, 菜单文字)`。顺序即左侧菜单的显示顺序。
-const SECTIONS: [(Section, &str); 9] = [
+const SECTIONS: [(Section, &str); 10] = [
+    (Section::Site, "站点信息"),
     (Section::Appearance, "外观"),
     (Section::Background, "背景"),
     (Section::Layout, "卡片与布局"),
@@ -67,7 +69,8 @@ impl Section {
     fn is_settings(self) -> bool {
         matches!(
             self,
-            Section::Appearance
+            Section::Site
+                | Section::Appearance
                 | Section::Background
                 | Section::Layout
                 | Section::Clock
@@ -203,6 +206,17 @@ pub fn SettingsPanel(
                     saved.set(true);
                     saving.set(false);
                     on_settings_saved.call(());
+
+                    // `<title>` / meta / favicon 是 SSR 时写进 head 的；Dioxus 的
+                    // document 元素在水合后不会再插入。站点信息改完直接刷新一次，
+                    // 比留着一份"标题变了、描述没变"的 head 更可预期。
+                    #[cfg(feature = "web")]
+                    if section == Section::Site {
+                        spawn(async move {
+                            gloo_timers::future::TimeoutFuture::new(600).await;
+                            let _ = document::eval("window.location.reload();");
+                        });
+                    }
                 }
                 Err(e) => {
                     save_error.set(Some(error_text(&e)));
@@ -290,6 +304,87 @@ pub fn SettingsPanel(
 
             div { class: "settings-content",
                 match section {
+                    // ---------- 站点信息 ----------
+                    Section::Site => rsx! {
+                        section { class: "panel-section",
+                            h3 { class: "panel-heading", "站点信息" }
+                            p { class: "field-hint",
+                                "这些是浏览器标签页、分享卡片上的信息，不是导航页的内容。"
+                                "保存后页面会自动刷新一次，让 head 里的标题/图标立即生效。"
+                            }
+
+                            label { class: "field",
+                                span { class: "field-label", "标题" }
+                                input {
+                                    class: "input",
+                                    maxlength: "60",
+                                    placeholder: "NekoTab",
+                                    value: "{draft().site_title}",
+                                    oninput: move |e| draft.with_mut(|s| s.site_title = e.value()),
+                                }
+                            }
+
+                            label { class: "field",
+                                span { class: "field-label", "描述" }
+                                input {
+                                    class: "input",
+                                    maxlength: "200",
+                                    placeholder: "极简自部署书签导航",
+                                    value: "{draft().site_description}",
+                                    oninput: move |e| draft.with_mut(|s| s.site_description = e.value()),
+                                }
+                            }
+
+                            label { class: "field",
+                                span { class: "field-label", "关键词（可选）" }
+                                input {
+                                    class: "input",
+                                    maxlength: "200",
+                                    placeholder: "书签, 导航, 起始页",
+                                    value: "{draft().site_keywords}",
+                                    oninput: move |e| draft.with_mut(|s| s.site_keywords = e.value()),
+                                }
+                            }
+
+                            label { class: "field",
+                                span { class: "field-label", "站点图标" }
+                                input {
+                                    class: "input",
+                                    placeholder: "留空用内置图标；也可填 https://… 或 /…",
+                                    value: "{draft().site_logo}",
+                                    oninput: move |e| draft.with_mut(|s| s.site_logo = e.value()),
+                                }
+                            }
+
+                            label { class: "field",
+                                span { class: "field-label", "主题色" }
+                                input {
+                                    class: "input",
+                                    maxlength: "7",
+                                    placeholder: "留空跟随主题；例如 #0b0d13",
+                                    value: "{draft().site_theme_color}",
+                                    oninput: move |e| draft.with_mut(|s| s.site_theme_color = e.value()),
+                                }
+                                p { class: "field-hint",
+                                    "移动端地址栏的颜色，填 #rrggbb 或 #rgb；留空则跟随深浅色主题。"
+                                }
+                            }
+                        }
+
+                        section { class: "panel-section",
+                            h3 { class: "panel-heading", "访问控制" }
+                            p { class: "field-hint",
+                                "部署时设置环境变量 ACCESS_PASSWORD 后，整站需要密码才能进入，"
+                                "登录状态保持 30 天。没有设置时这一节不影响使用。"
+                            }
+                            a {
+                                class: "btn-ghost export-link",
+                                href: "/logout",
+                                "退出登录"
+                            }
+                        }
+                    },
+
                     // ---------- 外观 ----------
                     Section::Appearance => rsx! {
                         section { class: "panel-section",

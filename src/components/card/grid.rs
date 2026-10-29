@@ -32,6 +32,8 @@ pub fn CardGrid(
     on_edit: EventHandler<Bookmark>,
     on_delete: EventHandler<Bookmark>,
     on_toggle_select: EventHandler<i64>,
+    /// 组件卡片自己改了数据，请首页刷新列表
+    on_widget_changed: EventHandler<()>,
     on_reorder: EventHandler<(i64, i64)>,
     /// 拖拽时把指针停在翻页按钮上：+1 下一页，-1 上一页（跨页拖拽）
     on_page_flip: EventHandler<isize>,
@@ -159,6 +161,7 @@ pub fn CardGrid(
                     on_edit,
                     on_delete,
                     on_toggle_select,
+                    on_widget_changed,
                     on_pointer_down: {
                         let id = item.id;
                         move |(x, y): (f64, f64)| {

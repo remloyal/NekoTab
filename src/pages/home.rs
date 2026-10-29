@@ -8,8 +8,8 @@ use crate::backend::{
 };
 use crate::components::{
     build_tabs, group_value, parse_filter, AddCardDialog, AddTab, BatchMoveList, BookmarkForm,
-    CardGrid, Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs,
-    Modal, Pager, QuoteLine, SearchBar, SearchMode, SettingsPanel, WidgetForm, GROUP_UNGROUPED,
+    CardGrid, Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs, Modal,
+    Pager, QuoteLine, SearchBar, SearchMode, SettingsPanel, WidgetForm, GROUP_UNGROUPED,
     SEARCH_INPUT_ID,
 };
 use crate::models::{widget_label, Bookmark, Group, Settings};
@@ -22,11 +22,19 @@ enum ModalState {
     /// 「添加卡片」弹窗。`tab` 是打开时停在的标签页，`kind` 是已经选好的组件类型
     /// （从右键菜单直接点某个组件进来时带着）。书签与组件共用这一个弹窗，入口因此
     /// 只剩一处——原来「加书签」和「加组件」是两条独立的路径。
-    AddCard { tab: AddTab, kind: Option<String> },
-    Edit { bookmark: Bookmark },
+    AddCard {
+        tab: AddTab,
+        kind: Option<String>,
+    },
+    Edit {
+        bookmark: Bookmark,
+    },
     EngineSettings,
     /// 删除确认。单条与批量共用：`ids` 是要删的集合，`message` 是文案。
-    ConfirmDelete { ids: Vec<i64>, message: String },
+    ConfirmDelete {
+        ids: Vec<i64>,
+        message: String,
+    },
     BatchMove,
 }
 
@@ -69,12 +77,18 @@ fn move_to_position(full: &[i64], dragged: i64, target: i64) -> Option<Vec<i64>>
     Some(order)
 }
 
-/// 一条书签的有效分组：`group_id` 指向已删除的分组时按「未分组」处理。
+/// 一条书签的有效分组列表：指向已删除分组的 id 被丢掉，剩下的按原顺序去重。
 ///
-/// 删除分组时会把组内书签的 `group_id` 清空，正常流程不会留下悬空引用；
+/// 删除分组时服务端会把该 id 从 `group_ids` 里摘掉，正常流程不会留下悬空引用；
 /// 这里兜住的是"删分组与读列表并发"这类边角，避免书签在任何标签下都看不见。
-fn effective_group(bookmark: &Bookmark, known: &HashSet<i64>) -> Option<i64> {
-    bookmark.group_id.filter(|id| known.contains(id))
+fn effective_groups(bookmark: &Bookmark, known: &HashSet<i64>) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::new();
+    for id in bookmark.group_id_list() {
+        if known.contains(&id) && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// 关键词匹配：空格分词，词之间 AND，每词在 title / url / description / tags 里找。
@@ -132,15 +146,21 @@ fn rotation_index(pool: &[String], nonce: &str) -> Option<usize> {
 }
 
 /// 按分组过滤值统计条数，键与标签页的 `value` 一致。
+///
+/// 多分组书签会在它所属的每个分组下各计一次；一条分组都没归的记账到「未分组」。
+/// 「全部」的条数不能把这张表加起来（会重复计数），由调用方单独传总数。
 fn count_by_group(items: &[Bookmark], known: &HashSet<i64>) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::new();
 
     for item in items {
-        let value = match effective_group(item, known) {
-            Some(id) => group_value(id),
-            None => GROUP_UNGROUPED.to_string(),
-        };
-        *counts.entry(value).or_insert(0) += 1;
+        let groups = effective_groups(item, known);
+        if groups.is_empty() {
+            *counts.entry(GROUP_UNGROUPED.to_string()).or_insert(0) += 1;
+        } else {
+            for id in groups {
+                *counts.entry(group_value(id)).or_insert(0) += 1;
+            }
+        }
     }
 
     counts
@@ -269,24 +289,24 @@ pub fn Home() -> Element {
 
     // 标签页的条数跟着当前结果集走（和原来的行为一致）
     let counts = count_by_group(&keyword_matched, &known_group_ids);
-    let tabs = build_tabs(&groups, &counts);
+    let tabs = build_tabs(&groups, &counts, keyword_matched.len());
 
     // 选中的分组若在结果里不存在了（被删掉，或该组已空），回落到「全部」
     let selected_tab = active_group();
-    let active_value = if selected_tab.is_empty() || tabs.iter().any(|tab| tab.value == selected_tab)
-    {
-        selected_tab
-    } else {
-        String::new()
-    };
+    let active_value =
+        if selected_tab.is_empty() || tabs.iter().any(|tab| tab.value == selected_tab) {
+            selected_tab
+        } else {
+            String::new()
+        };
     let filter = parse_filter(&active_value);
 
     let matched: Vec<Bookmark> = keyword_matched
         .into_iter()
         .filter(|item| match filter {
             Filter::All => true,
-            Filter::Ungrouped => effective_group(item, &known_group_ids).is_none(),
-            Filter::Group(id) => effective_group(item, &known_group_ids) == Some(id),
+            Filter::Ungrouped => effective_groups(item, &known_group_ids).is_empty(),
+            Filter::Group(id) => effective_groups(item, &known_group_ids).contains(&id),
         })
         .collect();
 
@@ -309,11 +329,7 @@ pub fn Home() -> Element {
     // 显示列表 = 组件（按它们自己的顺序）++ 本页书签。
     // 组件与书签的 sort_order 共用一列，但显示时按 kind 分两段，所以两边互不干扰：
     // 拖拽也只在同类之间生效（见 on_reorder），于是这一段始终是稳定的前缀。
-    let view: Vec<Bookmark> = widgets
-        .iter()
-        .cloned()
-        .chain(page_of_bookmarks)
-        .collect();
+    let view: Vec<Bookmark> = widgets.iter().cloned().chain(page_of_bookmarks).collect();
 
     let is_editing = editing();
     let is_selecting = selecting();
@@ -472,9 +488,8 @@ pub fn Home() -> Element {
         }
     });
     // 还没量到宽度时传 None：不夹取，而不是把每张卡都压成 1 格
-    let grid_columns = (grid_width() > 0.0).then(|| {
-        crate::models::columns_for(grid_width(), settings.tile_size, settings.tile_gap_x)
-    });
+    let grid_columns = (grid_width() > 0.0)
+        .then(|| crate::models::columns_for(grid_width(), settings.tile_size, settings.tile_gap_x));
 
     // ---- 拖拽落位 ----
     //
@@ -533,9 +548,12 @@ pub fn Home() -> Element {
 
     let selected_ids = selected();
     let selected_count = selected_ids.len();
-    // "全选本页"与跨页拖拽都要知道当前页有哪些 id
-    let view_ids: Vec<i64> = view.iter().map(|item| item.id).collect();
-    let view_for_select_all = view_ids.clone();
+    // "全选本页"只认书签：组件不属于任何分组，也不该被批量删除。
+    let view_for_select_all: Vec<i64> = view
+        .iter()
+        .filter(|item| !item.is_widget())
+        .map(|item| item.id)
+        .collect();
 
     // ---- 翻页 ----
     // 先取出页面配置：闭包要能 Copy 才能被多处捕获，所以不能让它们抓住整个 settings
@@ -579,12 +597,33 @@ pub fn Home() -> Element {
         });
     };
 
+    let favicon_href = if settings.site_logo.trim().is_empty() {
+        crate::FAVICON_SVG.to_string()
+    } else {
+        settings.site_logo.trim().to_string()
+    };
+    // 主题色：设置了就用它；留空跟随深浅色（与加这个设置之前的行为一致）。
+    let theme_color = if !settings.site_theme_color.trim().is_empty() {
+        settings.site_theme_color.trim().to_string()
+    } else if theme == "light" {
+        "#eef1f6".to_string()
+    } else {
+        "#0b0d13".to_string()
+    };
+
     rsx! {
-        // 主题色跟着主题走（移动端地址栏）。dioxus 0.7 没有 document::Html，
-        // 所以主题属性落在 .stage-root 上，body 的背景由 .bg 那一层负责铺。
+        // 站点品牌化：标题、描述、关键词、图标与地址栏主题色都来自设置。
+        // 放在 Home 而不是 App，是因为这些值要等 settings 到位；SSR 阶段
+        // `use_server_future` 已经把它们带过来了，首屏就是最终值。
+        document::Title { "{settings.site_title}" }
+        document::Meta { name: "description", content: "{settings.site_description}" }
+        if !settings.site_keywords.trim().is_empty() {
+            document::Meta { name: "keywords", content: "{settings.site_keywords}" }
+        }
+        document::Link { rel: "icon", href: "{favicon_href}" }
         document::Meta {
             name: "theme-color",
-            content: if theme == "light" { "#eef1f6" } else { "#0b0d13" },
+            content: "{theme_color}",
         }
 
         div {
@@ -817,6 +856,7 @@ pub fn Home() -> Element {
                                 });
                             },
                             on_toggle_select: toggle_select,
+                            on_widget_changed: move |_| refresh.set(refresh() + 1),
                             on_reorder,
                             // 拖到翻页按钮上翻页：节流一下，免得一次悬停连翻好几页
                             on_page_flip: move |direction: isize| {
@@ -1171,7 +1211,10 @@ mod tests {
             .iter()
             .map(|nonce| rotation_index(&pool, nonce))
             .collect();
-        assert!(picks.len() > 1, "十个 nonce 全落到同一条上，说明散列没起作用");
+        assert!(
+            picks.len() > 1,
+            "十个 nonce 全落到同一条上，说明散列没起作用"
+        );
     }
 
     fn bookmark(id: i64, title: &str, url: &str, description: &str, tags: &str) -> Bookmark {
@@ -1182,6 +1225,7 @@ mod tests {
             description: description.to_string(),
             tags: tags.to_string(),
             group_id: None,
+            group_ids: String::new(),
             icon: String::new(),
             created_at: String::new(),
             span_w: 1,
@@ -1195,7 +1239,13 @@ mod tests {
 
     #[test]
     fn keyword_matches_all_four_fields() {
-        let item = bookmark(1, "Rust 官网", "https://rust-lang.org", "系统编程语言", "编程,rust");
+        let item = bookmark(
+            1,
+            "Rust 官网",
+            "https://rust-lang.org",
+            "系统编程语言",
+            "编程,rust",
+        );
 
         assert!(matches_keyword(&item, "rust"), "标题命中");
         assert!(matches_keyword(&item, "官网"), "标题中文命中");
@@ -1231,14 +1281,21 @@ mod tests {
         let known: HashSet<i64> = [1, 2].into_iter().collect();
 
         let mut item = bookmark(1, "A", "https://a.com", "", "");
-        item.group_id = Some(1);
-        assert_eq!(effective_group(&item, &known), Some(1));
+        item.group_ids = "1".to_string();
+        assert_eq!(effective_groups(&item, &known), vec![1]);
 
-        item.group_id = Some(99);
-        assert_eq!(effective_group(&item, &known), None, "指向已删分组＝未分组");
+        item.group_ids = "99".to_string();
+        assert!(
+            effective_groups(&item, &known).is_empty(),
+            "指向已删分组＝未分组"
+        );
 
-        item.group_id = None;
-        assert_eq!(effective_group(&item, &known), None);
+        item.group_ids = String::new();
+        assert!(effective_groups(&item, &known).is_empty());
+
+        // 多分组：已知的留下，未知的丢掉，顺序保持
+        item.group_ids = "2,99,1,2".to_string();
+        assert_eq!(effective_groups(&item, &known), vec![2, 1]);
     }
 
     #[test]
@@ -1318,7 +1375,10 @@ mod tests {
 
         let (widgets, bookmarks) = split_cards(&cards);
         assert_eq!(widgets.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2, 4]);
-        assert_eq!(bookmarks.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(
+            bookmarks.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
     }
 
     /// 分流决定"页面上会出现什么"，所以不能丢卡片、也不能重复。

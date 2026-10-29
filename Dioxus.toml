@@ -9,4 +9,5 @@ name = "nekotab"
 pre_compress = true
 
 [web.app]
-title = "NekoTab | 书签导航"
+# 仅作为 HTML 外壳的兜底标题；运行时会由设置里的「站点信息 → 标题」覆盖。
+title = "NekoTab"

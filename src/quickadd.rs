@@ -105,7 +105,8 @@ async fn token_matches(pool: &SqlitePool, provided: &str) -> Result<bool, String
         return Ok(false);
     };
 
-    Ok(!provided.is_empty() && provided == expected)
+    Ok(!provided.is_empty()
+        && crate::auth::constant_eq(provided.as_bytes(), expected.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------

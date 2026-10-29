@@ -27,6 +27,9 @@ pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Elemen
     let ids: Vec<i64> = groups.iter().map(|group| group.id).collect();
     let name_len = name().chars().count();
     let is_edit = editing().is_some();
+    let picker_key = editing()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "new".to_string());
 
     let mut reset_form = move || {
         name.set(String::new());
@@ -74,7 +77,7 @@ pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Elemen
         section { class: "panel-section",
             h3 { class: "panel-heading", "分组管理" }
             p { class: "field-hint",
-                "分组就是首页顶部的分类标签页。没有书签的分组不会显示在标签栏里；删除分组不会删书签（组内书签归到「未分组」）。"
+                "分组就是首页顶部的分类标签页，一条书签可以同时属于多个分组。没有书签的分组不会显示在标签栏里；删除分组不会删书签，只会把它从书签的归属里移除（没有其它分组的书签落到「未分组」）。"
             }
 
             // ---------- 新增 / 编辑表单 ----------
@@ -101,6 +104,10 @@ pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Elemen
                 div { class: "field",
                     span { class: "field-label", "图标" }
                     IconPicker {
+                        // 用"正在编辑谁"当 key：切换编辑目标时重挂，选择器里的
+                        // 文字/颜色草稿与档位高亮才会按新值重置。同一个分组内
+                        // 打字不会换 key，焦点不会丢。
+                        key: "{picker_key}",
                         value: icon(),
                         on_change: move |v: String| icon.set(v),
                     }

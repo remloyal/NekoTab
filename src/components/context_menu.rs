@@ -71,30 +71,50 @@ pub fn ContextMenu(
 
                 if !card.is_widget() {
                     li { class: "menu-item has-sub",
-                        span { class: "menu-row", "移到分组" }
+                        span { class: "menu-row", "移到分组（会替换）" }
                         ul { class: "submenu",
+                            li { class: "menu-hint", "点一个分组会替换它现在的全部分组" }
                             li {
-                                class: "menu-item",
+                                class: if card.group_id_list().is_empty() {
+                                    "menu-item active"
+                                } else {
+                                    "menu-item"
+                                },
                                 onclick: {
                                     let selected = card.clone();
-                                    move |_| on_move.call((selected.clone(), None))
+                                    move |_| {
+                                        if selected.group_id_list().is_empty() {
+                                            on_close.call(());
+                                        } else {
+                                            on_move.call((selected.clone(), None));
+                                        }
+                                    }
                                 },
                                 "未分组"
                             }
                             for group in groups {
-                                li {
-                                    key: "{group.id}",
-                                    class: if card.group_id == Some(group.id) {
-                                        "menu-item active"
-                                    } else {
-                                        "menu-item"
-                                    },
-                                    onclick: {
-                                        let selected = card.clone();
-                                        let id = group.id;
-                                        move |_| on_move.call((selected.clone(), Some(id)))
-                                    },
-                                    "{group.name}"
+                                {
+                                    let list = card.group_id_list();
+                                    let active = list.contains(&group.id);
+                                    let only_this = list.len() == 1 && active;
+                                    rsx! {
+                                        li {
+                                            key: "{group.id}",
+                                            class: if active { "menu-item active" } else { "menu-item" },
+                                            onclick: {
+                                                let selected = card.clone();
+                                                let id = group.id;
+                                                move |_| {
+                                                    if only_this {
+                                                        on_close.call(());
+                                                    } else {
+                                                        on_move.call((selected.clone(), Some(id)));
+                                                    }
+                                                }
+                                            },
+                                            "{group.name}"
+                                        }
+                                    }
                                 }
                             }
                         }

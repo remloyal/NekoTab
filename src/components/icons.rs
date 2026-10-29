@@ -14,7 +14,7 @@ use dioxus::prelude::*;
 
 /// `(id, 中文名, 各段路径)`。id 会以 `i:{id}` 落库。
 #[rustfmt::skip]
-pub const GROUP_ICONS: [(&str, &str, &[&str]); 22] = [
+pub const GROUP_ICONS: [(&str, &str, &[&str]); 23] = [
     ("home", "首页", &["M3.5 10.5 L12 3.5 L20.5 10.5", "M6 9.5 V20 H18 V9.5"]),
     ("star", "收藏", &["M12 3.6 L14.1 9.1 L20 9.4 L15.4 13.1 L16.9 18.8 L12 15.6 L7.1 18.8 L8.6 13.1 L4 9.4 L9.9 9.1 Z"]),
     ("heart", "喜欢", &["M12 19.5 C9 17 4.5 13.5 4.5 9.8 A3.9 3.9 0 0 1 12 7.6 A3.9 3.9 0 0 1 19.5 9.8 C19.5 13.5 15 17 12 19.5 Z"]),
@@ -37,6 +37,7 @@ pub const GROUP_ICONS: [(&str, &str, &[&str]); 22] = [
     ("link", "链接", &["M9.5 14.5 L14.5 9.5", "M8 11.5 L6 13.5 A3.5 3.5 0 0 0 11 18.5 L13 16.5", "M16 12.5 L18 10.5 A3.5 3.5 0 0 0 13 5.5 L11 7.5"]),
     ("note", "记事", &["M5 4.5 H19 V20.5 H5 Z", "M8.5 9.5 H15.5", "M8.5 13 H15.5", "M8.5 16.5 H12.5"]),
     ("digital", "数字", &["M3.5 7 H20.5 V17 H3.5 Z", "M12 10.4 V10.8", "M12 13.2 V13.6"]),
+    ("check", "待办", &["M4.5 12.5 L9.5 17.5 L19.5 6.5"]),
 ];
 
 /// 内置图标的值前缀，落库形如 `i:code`。
@@ -58,7 +59,11 @@ pub fn builtin_id(value: &str) -> Option<&str> {
 
 /// 首字回退用的字符。
 pub fn initial(name: &str) -> String {
-    name.chars().next().unwrap_or('?').to_uppercase().to_string()
+    name.chars()
+        .next()
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string()
 }
 
 /// 由字符串生成稳定的色相（FNV-1a 取模 360），供"取不到图标"时的底色使用。
@@ -102,6 +107,17 @@ pub fn group_icon(icon: &str, name: &str, class: &str) -> Element {
         if let Some(svg) = builtin_svg(id) {
             return rsx! { span { class: "group-icon {class}", {svg} } };
         }
+    }
+
+    // 文字图标：`t:#rrggbb:字`。底色与文字都来自图标值，缩略图上不用名称首字。
+    if let Some((color, text)) = crate::models::text_icon_parts(icon) {
+        return rsx! {
+            span {
+                class: "group-icon group-icon-text {class}",
+                style: "background: {color};",
+                "{text}"
+            }
+        };
     }
 
     if icon.starts_with("http://") || icon.starts_with("https://") {

@@ -6,14 +6,20 @@
 
 use dioxus::prelude::*;
 
+mod calendar;
 mod clock;
 mod dial;
+mod hot_search;
 mod note;
+mod todo;
 mod weather;
 
+pub use calendar::CalendarWidget;
 pub use clock::ClockWidget;
 pub use dial::DialWidget;
+pub use hot_search::HotSearchWidget;
 pub use note::NoteWidget;
+pub use todo::TodoWidget;
 pub use weather::WeatherWidget;
 
 /// 每秒跳一次的"当前时刻"快照。
@@ -22,6 +28,7 @@ pub use weather::WeatherWidget;
 /// 读的人得回去数第几个是月份。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Tick {
+    pub year: u32,
     pub hours: u32,
     pub minutes: u32,
     pub seconds: u32,
@@ -49,6 +56,7 @@ pub(crate) fn use_tick() -> Signal<Option<Tick>> {
         loop {
             let now = js_sys::Date::new_0();
             tick.set(Some(Tick {
+                year: now.get_full_year(),
                 hours: now.get_hours(),
                 minutes: now.get_minutes(),
                 seconds: now.get_seconds(),

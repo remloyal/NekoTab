@@ -40,6 +40,9 @@ tower-http = { version = "0.6", optional = true, default-features = false, featu
     "compression-gzip",
     "compression-br",
 ] }
+# 访问密码的会话签名（HMAC-SHA256）与常量时间比较。
+# ring 本来就在 reqwest/rustls 的依赖树里，直接声明只是启用它，不会多编一份。
+ring = { version = "0.17", optional = true }
 
 # ---- 仅 web（wasm）编译：时钟、农历、搜索跳转、指针拖拽、panic 现场 ----
 gloo-timers = { version = "0.3", optional = true, features = ["futures"] }
@@ -81,6 +84,7 @@ server = [
     "dep:anyhow",
     "dep:reqwest",
     "dep:tower-http",
+    "dep:ring",
 ]
 
 [profile.release]

@@ -1,16 +1,28 @@
 use dioxus::prelude::*;
 
-use super::widgets::{ClockWidget, DialWidget, NoteWidget, WeatherWidget};
+use super::widgets::{
+    CalendarWidget, ClockWidget, DialWidget, HotSearchWidget, NoteWidget, TodoWidget, WeatherWidget,
+};
 use crate::components::icons;
 use crate::models::{
-    Bookmark, ClockConfig, DialConfig, NoteConfig, WeatherConfig, KIND_CLOCK, KIND_DIAL,
-    KIND_NOTE, KIND_WEATHER,
+    Bookmark, CalendarConfig, ClockConfig, DialConfig, HotSearchConfig, NoteConfig, TodoConfig,
+    WeatherConfig, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT, KIND_NOTE, KIND_TODO,
+    KIND_WEATHER,
 };
 
 /// 书签自定义图标的渲染。空串返回 `None`（表示走站点自动代取那条路）。
 fn custom_icon(icon: &str) -> Option<Element> {
     if let Some(id) = icons::builtin_id(icon) {
         return icons::builtin_svg(id).map(|svg| rsx! { div { class: "tile-custom", {svg} } });
+    }
+    if let Some((color, text)) = crate::models::text_icon_parts(icon) {
+        return Some(rsx! {
+            div {
+                class: "tile-text-icon",
+                style: "background: {color};",
+                "{text}"
+            }
+        });
     }
     if icon.starts_with("http://") || icon.starts_with("https://") || icon.starts_with('/') {
         return Some(rsx! {
@@ -23,7 +35,10 @@ fn custom_icon(icon: &str) -> Option<Element> {
 fn icon_of(bookmark: &Bookmark) -> (String, u32) {
     // 首字与稳定色相的算法在 icons 里：搜索引擎图标（engine_logo）用的是同一套回退，
     // 不该让那个组件伸手进卡片文件来拿
-    (icons::initial(&bookmark.title), icons::hash_hue(&bookmark.url))
+    (
+        icons::initial(&bookmark.title),
+        icons::hash_hue(&bookmark.url),
+    )
 }
 
 fn safe_href(url: &str) -> String {
@@ -78,6 +93,8 @@ pub fn CardTile(
     on_edit: EventHandler<Bookmark>,
     on_delete: EventHandler<Bookmark>,
     on_toggle_select: EventHandler<i64>,
+    /// 组件卡片自己改了数据（目前只有待办勾选），请父级刷新列表
+    on_widget_changed: EventHandler<()>,
     /// 编辑态按下的坐标（拖拽起点）
     on_pointer_down: EventHandler<(f64, f64)>,
 ) -> Element {
@@ -120,6 +137,24 @@ pub fn CardTile(
         },
         KIND_NOTE => rsx! {
             NoteWidget { config: NoteConfig::parse(&bookmark.config) }
+        },
+        KIND_CALENDAR => rsx! {
+            CalendarWidget { config: CalendarConfig::parse(&bookmark.config) }
+        },
+        KIND_TODO => rsx! {
+            TodoWidget {
+                // 参数变了就重挂：本地勾选状态以 config 为初值，重挂才能同步到表单里的改动
+                key: "{bookmark.config}",
+                card_id: bookmark.id,
+                config: TodoConfig::parse(&bookmark.config),
+                on_changed: move |_| on_widget_changed.call(()),
+            }
+        },
+        KIND_HOT => rsx! {
+            HotSearchWidget {
+                key: "{bookmark.config}",
+                config: HotSearchConfig::parse(&bookmark.config),
+            }
         },
         KIND_WEATHER => rsx! {
             WeatherWidget {
@@ -238,7 +273,11 @@ pub fn CardTile(
 
                     if selecting {
                         evt.prevent_default();
-                        on_toggle_select.call(target.id);
+                        // 批量选择只管书签：组件没有分组、也不进分页，选中它只会
+                        // 让"移到分组/删除"误伤一张组件卡。
+                        if !target.is_widget() {
+                            on_toggle_select.call(target.id);
+                        }
                         return;
                     }
 
@@ -261,7 +300,7 @@ pub fn CardTile(
                 }
             },
 
-            if selecting {
+            if selecting && !is_widget {
                 span {
                     class: if selected { "tile-pick picked" } else { "tile-pick" },
                     title: if selected { "取消选择" } else { "选择" },

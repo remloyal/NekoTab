@@ -1313,6 +1313,15 @@ body {
     transition: background 0.12s, color 0.12s;
 }
 
+.menu-hint {
+    padding: 4px 12px 6px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: var(--text-dim);
+    white-space: normal;
+    list-style: none;
+}
+
 .menu-item:hover,
 .menu-item.active {
     background: var(--accent-soft);
@@ -1321,8 +1330,7 @@ body {
 
 .menu-item.danger:hover {
     background: rgba(255, 107, 107, 0.14);
-    color: var(--danger);
-}
+    color: var(--danger);}
 
 .menu-row {
     display: flex;
@@ -2173,7 +2181,7 @@ select.input {
     border: none;
     border-radius: 50%;
     cursor: pointer;
-    opacity: 0;
+    opacity: 0.55;
     transition: opacity 0.12s, color 0.12s, background 0.12s;
 }
 
@@ -2527,6 +2535,360 @@ select.input {
     padding: 8px 16px;
     font-size: 13.5px;
     text-decoration: none;
+}
+
+/* ---------- 文字图标 ---------- */
+/* 与 .tile-favicon 一样铺满图标块；底色来自图标值里的颜色。 */
+.tile-text-icon {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border-radius: inherit;
+    color: #fff;
+    font-size: calc(var(--icon) * 0.36);
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0.02em;
+}
+
+.group-icon-text {
+    color: #fff;
+    font-weight: 700;
+    overflow: hidden;
+    line-height: 1;
+    text-align: center;
+}
+
+/* 标签栏里只有 16px，两个字放不下；把字号压到 8px 并裁掉溢出。 */
+.group-icon-text.group-icon-xs {
+    font-size: 8px;
+}
+
+.text-icon-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.text-icon-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.text-icon-preview .group-icon {
+    width: 42px;
+    height: 42px;
+    font-size: 17px;
+}
+
+.color-swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.color-swatch {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 2px solid transparent;
+    border-radius: 9px;
+    cursor: pointer;
+}
+
+.color-swatch.active {
+    border-color: var(--text);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* ---------- 搜索引擎：编辑与常用预设 ---------- */
+.editing-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--accent-soft);
+    border: 1px solid var(--card-line);
+}
+
+.preset-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.preset-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--hover-soft);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.preset-chip:hover:not(:disabled) {
+    border-color: var(--accent);
+}
+
+.preset-chip:disabled {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.preset-added {
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.engine-card-edit {
+    position: absolute;
+    bottom: 4px;
+    left: 4px;
+    padding: 2px 7px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--hover);
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity 0.15s;
+}
+
+.engine-card:hover .engine-card-edit {
+    opacity: 1;
+}
+
+.engine-card-edit:hover {
+    color: var(--text);
+    background: var(--hover);
+}
+
+/* 编辑态 / 选择态时，组件内部的勾选、热搜条目、日历翻月都要让路给卡片本身：
+   否则点一下热搜就会开新标签页，而不是选中/打开设置。 */
+.grid.editing .tile-widget .widget *,
+.grid.selecting .tile-widget .widget * {
+    pointer-events: none;
+}
+
+/* ---------- 日历组件 ---------- */
+.widget-calendar,
+.widget-todo,
+.widget-hot {
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 0;
+    padding: 2px 4px;
+    text-align: left;
+}
+
+.cal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    line-height: 1.2;
+}
+
+.cal-nav {
+    padding: 0 5px;
+    color: var(--text-dim);
+    font-size: min(calc(100cqw * 0.1), calc(100cqh * 0.09));
+    cursor: pointer;
+    user-select: none;
+}
+
+.cal-nav:hover {
+    color: var(--text);
+}
+
+.cal-title {
+    font-size: min(calc(100cqw * 0.085), calc(100cqh * 0.075));
+    font-weight: 650;
+    text-align: center;
+}
+
+.cal-lunar {
+    display: block;
+    margin-top: 1px;
+    font-size: 0.72em;
+    font-weight: 400;
+    opacity: 0.65;
+}
+
+.cal-week,
+.cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    width: 100%;
+    text-align: center;
+}
+
+.cal-week {
+    margin-top: 3px;
+}
+
+.cal-weekday {
+    padding: 1px 0;
+    font-size: min(calc(100cqw * 0.062), calc(100cqh * 0.055));
+    color: var(--text-dim);
+}
+
+.cal-grid {
+    flex: 1;
+    align-content: start;
+}
+
+.cal-day {
+    padding: 1px 0;
+    font-size: min(calc(100cqw * 0.07), calc(100cqh * 0.062));
+    font-variant-numeric: tabular-nums;
+    border-radius: 6px;
+}
+
+.cal-day.empty {
+    visibility: hidden;
+}
+
+.cal-day.today {
+    color: #fff;
+    font-weight: 700;
+    background: var(--accent);
+}
+
+/* ---------- 待办组件 ---------- */
+.todo-head,
+.hot-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding-bottom: 2px;
+    font-size: min(calc(100cqw * 0.08), calc(100cqh * 0.07));
+}
+
+.todo-title,
+.hot-title {
+    font-weight: 650;
+}
+
+.todo-progress,
+.hot-source {
+    color: var(--text-dim);
+    font-size: 0.82em;
+}
+
+.todo-list,
+.hot-list {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    flex-direction: column;
+    gap: 1px;
+    overflow: hidden;
+}
+
+.todo-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: min(calc(100cqw * 0.068), calc(100cqh * 0.06));
+    line-height: 1.35;
+}
+
+.todo-check {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 1.05em;
+    height: 1.05em;
+    font-size: 0.82em;
+    color: #fff;
+    border: 1px solid var(--text-dim);
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.todo-item.done .todo-check {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.todo-item.done .todo-text {
+    color: var(--text-dim);
+    text-decoration: line-through;
+}
+
+.todo-text,
+.hot-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.todo-more {
+    padding-top: 1px;
+    font-size: 0.78em;
+    color: var(--text-dim);
+}
+
+/* ---------- 热搜组件 ---------- */
+.hot-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 0;
+    font-size: min(calc(100cqw * 0.066), calc(100cqh * 0.058));
+    line-height: 1.35;
+    cursor: pointer;
+}
+
+.hot-item:hover .hot-text {
+    color: var(--accent);
+}
+
+.hot-rank {
+    flex: none;
+    width: 1.2em;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.hot-item:nth-child(-n + 3) .hot-rank {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.widget-error {
+    font-size: 0.82em;
+    line-height: 1.45;
+    color: var(--danger);
+}
+
+/* 1×1 时这些组件的高度只够放标题：把列表/月历收起来，避免从半行处裁断。 */
+@container (max-height: 135px) {
+    .widget-calendar .cal-week,
+    .widget-calendar .cal-grid,
+    .widget-todo .todo-list,
+    .widget-todo .todo-more,
+    .widget-hot .hot-list {
+        display: none;
+    }
 }
 
 /* ---------- 响应式 ---------- */

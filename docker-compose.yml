@@ -43,6 +43,11 @@ services:
       ICON_DIR: "/data/icon"
       # 上传的壁纸是用户数据，同样必须落在卷里
       WALLPAPER_DIR: "/data/wallpaper"
+      # 可选整站访问密码。留空＝不设防；设置后登录状态保持 30 天。
+      # 建议同时在反向代理上启用 HTTPS，否则密码是明文传输的。
+      ACCESS_PASSWORD: "${ACCESS_PASSWORD:-}"
+      # 可选会话签名密钥；留空则用 ACCESS_PASSWORD 派生。
+      SESSION_SECRET: "${SESSION_SECRET:-}"
     restart: unless-stopped
     # 运行镜像里没有 curl/wget，用 bash 的 /dev/tcp 做 TCP 探活即可。
     healthcheck:

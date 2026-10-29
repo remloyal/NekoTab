@@ -72,9 +72,14 @@ pub fn GroupTabs(tabs: Vec<GroupTab>, active: String, on_select: EventHandler<St
 ///
 /// 没有书签的分组不出现（和原来"空标签自动消失"的行为一致），
 /// 但只要库里还有未分组的书签，「未分组」这一项就始终在。
-pub fn build_tabs(groups: &[Group], counts: &std::collections::HashMap<String, usize>) -> Vec<GroupTab> {
-    let total: usize = counts.values().sum();
-
+///
+/// `total` 是结果集里**书签的条数**，不是 `counts` 的和：多分组书签会在多个
+/// 分组下各计一次，加起来会大于「全部」。
+pub fn build_tabs(
+    groups: &[Group],
+    counts: &std::collections::HashMap<String, usize>,
+    total: usize,
+) -> Vec<GroupTab> {
     let mut tabs = vec![GroupTab {
         label: "全部".to_string(),
         value: GROUP_ALL.to_string(),
@@ -139,16 +144,17 @@ mod tests {
         counts.insert(GROUP_UNGROUPED.to_string(), 2);
         counts.insert(group_value(1), 3);
 
-        let tabs = build_tabs(&groups, &counts);
+        // 多分组时 counts 之和会大于书签数（同一条在两个组里各计一次）；
+        // 「全部」必须用调用方传进来的书签数，而不是把 counts 加起来。
+        let total = 4;
+        let tabs = build_tabs(&groups, &counts, total);
         let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
 
         assert_eq!(labels, vec!["全部", "未分组", "开发"]);
-        assert_eq!(tabs[0].count, 5, "全部 = 未分组 + 开发");
+        assert_eq!(tabs[0].count, 4, "全部用书签数，不重复计数");
+        assert_eq!(counts.values().sum::<usize>(), 5, "分组计数允许大于总数");
         assert_eq!(tabs[2].count, 3);
-        assert!(
-            !labels.contains(&"空分组"),
-            "没有书签的分组不出现"
-        );
+        assert!(!labels.contains(&"空分组"), "没有书签的分组不出现");
     }
 
     #[test]
@@ -157,7 +163,8 @@ mod tests {
         let mut counts: HashMap<String, usize> = HashMap::new();
         counts.insert(group_value(1), 1);
 
-        let tabs = build_tabs(&groups, &counts);
+        let total: usize = counts.values().sum();
+        let tabs = build_tabs(&groups, &counts, total);
         let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
         assert_eq!(labels, vec!["全部", "开发"]);
     }
@@ -169,7 +176,8 @@ mod tests {
         counts.insert(group_value(9), 1);
         counts.insert(group_value(3), 1);
 
-        let tabs = build_tabs(&groups, &counts);
+        let total: usize = counts.values().sum();
+        let tabs = build_tabs(&groups, &counts, total);
         let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
         // 传进来的顺序就是显示顺序，不按 id 重排
         assert_eq!(labels, vec!["全部", "乙", "甲"]);

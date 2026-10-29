@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
 use crate::components::icon_picker::IconPicker;
 use crate::models::{
-    clamp_span, AddOutcome, Bookmark, Group, NewBookmark, SPAN_MAX, SPAN_PRESETS,
+    clamp_span, AddOutcome, Bookmark, Group, NewBookmark, CARD_SURFACES, SPAN_MAX, SPAN_PRESETS,
 };
 
 /// 书签表单，作为弹窗内容使用。
@@ -24,7 +24,12 @@ pub fn BookmarkForm(
     let is_edit = editing_id.is_some();
     let submit_label = if is_edit { "保存修改" } else { "保存" };
 
-    let mut title = use_signal(|| existing.as_ref().map(|b| b.title.clone()).unwrap_or_default());
+    let mut title = use_signal(|| {
+        existing
+            .as_ref()
+            .map(|b| b.title.clone())
+            .unwrap_or_default()
+    });
     let mut url = use_signal(|| existing.as_ref().map(|b| b.url.clone()).unwrap_or_default());
     let mut description = use_signal(|| {
         existing
@@ -32,23 +37,39 @@ pub fn BookmarkForm(
             .map(|b| b.description.clone())
             .unwrap_or_default()
     });
-    let mut icon = use_signal(|| existing.as_ref().map(|b| b.icon.clone()).unwrap_or_default());
-    // 标签不再是界面上的东西（分类只由分组承担），但库里已有的值要原样带过去：
-    // update 会整行覆盖，这里若不回传就等于把老数据清空了。
-    let existing_tags = existing.as_ref().map(|b| b.tags.clone()).unwrap_or_default();
-    // 底色同理。书签卡现在没有底色可选（第一期只给组件卡），但 update 整行覆盖，
-    // 不回传就会把这个字段清掉——将来书签也能选面时，这就是一处会丢数据的地方。
-    let existing_surface = existing
-        .as_ref()
-        .map(|b| b.surface.clone())
-        .unwrap_or_default();
-    // 下拉框的值统一用字符串：空串即"未分组"，这样 select 的 value 不必处理 Option
-    let mut group_id = use_signal(|| {
+    let mut icon = use_signal(|| {
         existing
             .as_ref()
-            .and_then(|b| b.group_id)
-            .or(default_group)
-            .map(|id| id.to_string())
+            .map(|b| b.icon.clone())
+            .unwrap_or_default()
+    });
+    // 标签不再是界面上的东西（分类只由分组承担），但库里已有的值要原样带过去：
+    // update 会整行覆盖，这里若不回传就等于把老数据清空了。
+    let existing_tags = existing
+        .as_ref()
+        .map(|b| b.tags.clone())
+        .unwrap_or_default();
+    // 底色。空串是"没设过"——书签卡的默认是"无面"，由 models::effective_surface 解析。
+    let mut surface = use_signal(|| {
+        existing
+            .as_ref()
+            .map(|b| b.surface.clone())
+            .unwrap_or_default()
+    });
+    // 一条书签可以属于多个分组；老数据只 group_id 时也在这里统一成列表。
+    // 指向已删除分组的 id 先滤掉，避免"网格里显示未分组、弹窗里却没选中任何分组"。
+    let known_group_ids: Vec<i64> = groups.iter().map(|group| group.id).collect();
+    let mut group_ids = use_signal(|| {
+        existing
+            .as_ref()
+            .map(|b| {
+                b.group_id_list()
+                    .into_iter()
+                    .filter(|id| known_group_ids.contains(id))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|ids| !ids.is_empty())
+            .or_else(|| default_group.map(|id| vec![id]))
             .unwrap_or_default()
     });
     // 卡片占几格。老数据没有这个字段（0）时按一格显示
@@ -67,7 +88,9 @@ pub fn BookmarkForm(
             url: url(),
             description: description(),
             tags: existing_tags.clone(),
-            group_id: group_id().parse().ok(),
+            // 主分组取第一个；完整归属由 group_ids 承载
+            group_id: group_ids().first().copied(),
+            group_ids: group_ids(),
             icon: icon(),
             span_w: span_w(),
             span_h: span_h(),
@@ -75,7 +98,7 @@ pub fn BookmarkForm(
             kind: crate::models::KIND_BOOKMARK.to_string(),
             // 书签没有组件参数。update 的 SQL 里不写 kind，所以种类改不掉
             config: String::new(),
-            surface: existing_surface.clone(),
+            surface: surface(),
         };
 
         spawn(async move {
@@ -155,19 +178,37 @@ pub fn BookmarkForm(
                 }
             }
 
-            label { class: "field",
-                span { class: "field-label", "分组" }
-                select {
-                    class: "input",
-                    value: "{group_id}",
-                    onchange: move |e| group_id.set(e.value()),
-                    option { value: "", "未分组" }
+            div { class: "field",
+                span { class: "field-label", "分组（可多选）" }
+                div { class: "segmented wrap",
+                    button {
+                        class: if group_ids().is_empty() { "segment active" } else { "segment" },
+                        r#type: "button",
+                        onclick: move |_| group_ids.set(Vec::new()),
+                        "未分组"
+                    }
                     for group in groups {
-                        option { value: "{group.id}", "{group.name}" }
+                        button {
+                            key: "{group.id}",
+                            class: if group_ids().contains(&group.id) { "segment active" } else { "segment" },
+                            r#type: "button",
+                            onclick: move |_| {
+                                let id = group.id;
+                                let mut list = group_ids();
+                                if let Some(pos) = list.iter().position(|known| *known == id) {
+                                    list.remove(pos);
+                                } else {
+                                    list.push(id);
+                                }
+                                group_ids.set(list);
+                            },
+                            "{group.name}"
+                        }
                     }
                 }
                 p { class: "field-hint",
-                    "分组决定卡片出现在哪个分类标签页下（一条书签只属于一个分组）；在设置 → 分组管理里增删。"
+                    "一条书签可以同时出现在多个分类标签页下；一个都不选就是「未分组」。"
+                    "分组在设置 → 分组管理里增删。"
                 }
             }
 
@@ -201,7 +242,26 @@ pub fn BookmarkForm(
                     auto_label: "自动（取站点图标）",
                 }
                 p { class: "field-hint",
-                    "默认按网址自动取站点图标，取不到时回退成名称首字；也可以在这里指定内置图标或图片地址。"
+                    "默认按网址自动取站点图标，取不到时回退成名称首字；也可以选内置图标、"
+                    "用一两个字做彩色图标，或填图片地址。"
+                }
+            }
+
+            div { class: "field",
+                span { class: "field-label", "卡片底色" }
+                div { class: "segmented wrap",
+                    for (id, label) in CARD_SURFACES {
+                        button {
+                            key: "{label}",
+                            class: if surface() == id { "segment active" } else { "segment" },
+                            r#type: "button",
+                            onclick: move |_| surface.set(id.to_string()),
+                            "{label}"
+                        }
+                    }
+                }
+                p { class: "field-hint",
+                    "书签卡默认透明（图标块自带底色）；压深色壁纸看不清时，可以给它一层半透明或实底。"
                 }
             }
 

@@ -8,8 +8,8 @@
 use dioxus::prelude::*;
 
 use crate::models::{
-    AddOutcome, Bookmark, Engine, Group, ImportReport, NewBookmark, NewEngine, NewGroup, Quote,
-    Settings, TrashItem, Weather,
+    AddOutcome, Bookmark, Engine, Group, HotItem, ImportReport, NewBookmark, NewEngine, NewGroup,
+    Quote, Settings, TrashItem, Weather,
 };
 // 只在服务端的入库校验里用到（客户端的夹取在组件层）
 #[cfg(feature = "server")]
@@ -64,8 +64,8 @@ fn build_search_sql(keyword_count: usize, bookmarks_only: bool) -> String {
                            OR tags LIKE ? ESCAPE '\\')";
 
     let mut sql = String::from(
-        "SELECT id, title, url, description, tags, group_id, icon, created_at, span_w, span_h, \
-         kind, config, surface \
+        "SELECT id, title, url, description, tags, group_id, group_ids, icon, created_at, \
+         span_w, span_h, kind, config, surface \
          FROM bookmarks WHERE deleted_at IS NULL",
     );
 
@@ -91,6 +91,8 @@ pub(crate) struct CleanBookmark {
     pub description: String,
     pub tags: String,
     pub group_id: Option<i64>,
+    /// 全部分组 id，逗号分隔；空串表示未分组。
+    pub group_ids: String,
     pub icon: String,
     pub span_w: i64,
     pub span_h: i64,
@@ -107,8 +109,9 @@ pub(crate) struct CleanBookmark {
 #[cfg(feature = "server")]
 async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
     use crate::models::{
-        is_widget_kind, ClockConfig, DialConfig, NoteConfig, WeatherConfig, KIND_CLOCK, KIND_DIAL,
-        KIND_NOTE, KIND_WEATHER,
+        is_widget_kind, text_icon_parts, CalendarConfig, ClockConfig, DialConfig, HotSearchConfig,
+        NoteConfig, TodoConfig, WeatherConfig, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT,
+        KIND_NOTE, KIND_TODO, KIND_WEATHER,
     };
 
     let title = input.title.trim().to_string();
@@ -126,11 +129,12 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
     let icon = input.icon.trim().to_string();
     let icon_ok = icon.is_empty()
         || icon.starts_with("i:")
+        || text_icon_parts(&icon).is_some()
         || icon.starts_with("http://")
         || icon.starts_with("https://")
         || icon.starts_with('/');
     if !icon_ok {
-        return Err("图标需为内置图标、http(s) 地址或以 / 开头的本站路径".to_string());
+        return Err("图标需为内置图标、文字图标、http(s) 地址或以 / 开头的本站路径".to_string());
     }
 
     // 跨度在这里夹好：0（老备份、调用方没传）会被抬到 1
@@ -164,6 +168,15 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
                 }
                 .to_json()
             }
+            KIND_CALENDAR => CalendarConfig::parse(&input.config).to_json(),
+            KIND_TODO => TodoConfig::parse(&input.config).clean().to_json(),
+            KIND_HOT => {
+                let config = HotSearchConfig::parse(&input.config);
+                HotSearchConfig {
+                    source: HotSearchConfig::clean_source(&config.source),
+                }
+                .to_json()
+            }
             _ => String::new(),
         };
 
@@ -175,6 +188,7 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
             description: input.description.trim().to_string(),
             tags: String::new(),
             group_id: None,
+            group_ids: String::new(),
             icon,
             span_w,
             span_h,
@@ -193,16 +207,32 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
         return Err("URL 需以 http:// 或 https:// 开头".to_string());
     }
 
-    // 分组可能已被删掉，落库前确认一次；不存在就当归到"未分组"，
-    // 免得留下指向空气的 group_id 让条目在任何分组标签下都不显示。
-    let group_id = match input.group_id {
-        Some(id) => sqlx::query_scalar::<_, i64>("SELECT id FROM groups WHERE id = ?")
-            .bind(id)
-            .fetch_optional(crate::db::pool())
-            .await
-            .map_err(|e| format!("检查分组失败: {e}"))?,
-        None => None,
-    };
+    // 分组可能已被删掉，落库前确认一次；不存在就丢掉，免得留下指向空气的 id
+    // 让条目在任何分组标签下都不显示。`group_ids` 是新字段，旧调用方只传
+    // `group_id` 时退回单值。
+    let mut candidates: Vec<i64> = input.group_ids.clone();
+    if candidates.is_empty() {
+        if let Some(id) = input.group_id {
+            candidates.push(id);
+        }
+    }
+    let known_groups: Vec<i64> = sqlx::query_scalar("SELECT id FROM groups")
+        .fetch_all(crate::db::pool())
+        .await
+        .map_err(|e| format!("读取分组失败: {e}"))?;
+    let mut group_ids: Vec<i64> = Vec::new();
+    // 先过滤再截断：否则前 20 个里混着重复/已删的 id 时，后面合法的反而被丢掉。
+    // 原始候选也设个上限，避免调用方塞一个超长数组来放大查询。
+    for id in candidates.into_iter().take(100) {
+        if id <= 0 || group_ids.contains(&id) || !known_groups.contains(&id) {
+            continue;
+        }
+        group_ids.push(id);
+        if group_ids.len() >= 20 {
+            break;
+        }
+    }
+    let group_id = group_ids.first().copied();
 
     Ok(CleanBookmark {
         title,
@@ -210,6 +240,11 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
         description: input.description.trim().to_string(),
         tags: normalize_tags(&input.tags),
         group_id,
+        group_ids: group_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
         icon,
         span_w,
         span_h,
@@ -319,9 +354,9 @@ pub(crate) async fn insert_new_bookmark(
     let kind = row.kind;
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO bookmarks \
-         (title, url, description, tags, group_id, icon, span_w, span_h, kind, config, surface, \
-          sort_order) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+         (title, url, description, tags, group_id, group_ids, icon, span_w, span_h, kind, config, \
+          surface, sort_order) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
                  COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
@@ -330,6 +365,7 @@ pub(crate) async fn insert_new_bookmark(
     .bind(row.description)
     .bind(row.tags)
     .bind(row.group_id)
+    .bind(row.group_ids)
     .bind(row.icon)
     .bind(row.span_w)
     .bind(row.span_h)
@@ -384,6 +420,7 @@ pub(crate) async fn quick_add(
             description: description.trim().to_string(),
             tags: String::new(),
             group_id: None,
+            group_ids: String::new(),
             icon: String::new(),
             // 快捷添加只给 URL，格子尺寸用默认的一格
             span_w: 1,
@@ -467,13 +504,14 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
 
     let affected = sqlx::query(
         "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
-         icon = ?, span_w = ?, span_h = ?, config = ?, surface = ? WHERE id = ?",
+         group_ids = ?, icon = ?, span_w = ?, span_h = ?, config = ?, surface = ? WHERE id = ?",
     )
     .bind(row.title)
     .bind(row.url)
     .bind(row.description)
     .bind(row.tags)
     .bind(row.group_id)
+    .bind(row.group_ids)
     .bind(row.icon)
     .bind(row.span_w)
     .bind(row.span_h)
@@ -594,11 +632,14 @@ pub async fn move_bookmarks(ids: Vec<i64>, group_id: Option<i64>) -> Result<usiz
 
     let mut affected = 0usize;
     for id in &ids {
-        affected += sqlx::query("UPDATE bookmarks SET group_id = ? WHERE id = ? AND group_id IS NOT ?")
-            .bind(group_id)
-            .bind(id)
-            .bind(group_id)
-            .execute(&mut *tx)
+        // 组件不属于任何分组：即使调用方误传了组件 id 也写不进去。
+        affected += sqlx::query(
+            "UPDATE bookmarks SET group_id = ?, group_ids = ? WHERE id = ? AND kind = ''",
+        )
+        .bind(group_id)
+        .bind(group_id.map(|id| id.to_string()).unwrap_or_default())
+        .bind(id)
+        .execute(&mut *tx)
             .await
             .map_err(|e| ServerFnError::new(format!("移动分组失败: {e}")))?
             .rows_affected() as usize;
@@ -702,12 +743,10 @@ pub async fn purge_bookmarks(ids: Vec<i64>) -> Result<usize, ServerFnError> {
 pub async fn list_groups() -> Result<Vec<Group>, ServerFnError> {
     use crate::db;
 
-    sqlx::query_as::<_, Group>(
-        "SELECT id, name, icon FROM groups ORDER BY sort_order ASC, id ASC",
-    )
-    .fetch_all(db::pool())
-    .await
-    .map_err(|e| ServerFnError::new(format!("加载分组失败: {e}")))
+    sqlx::query_as::<_, Group>("SELECT id, name, icon FROM groups ORDER BY sort_order ASC, id ASC")
+        .fetch_all(db::pool())
+        .await
+        .map_err(|e| ServerFnError::new(format!("加载分组失败: {e}")))
 }
 
 /// 新增分组，落在末尾。返回新 id。
@@ -791,12 +830,47 @@ pub async fn delete_group(id: i64) -> Result<(), ServerFnError> {
         .await
         .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
 
-    // 回收站里的书签也要一起归位，否则还原后仍指向已删的分组
-    sqlx::query("UPDATE bookmarks SET group_id = NULL WHERE group_id = ?")
-        .bind(id)
-        .execute(&mut *tx)
+    // 回收站里的书签也要一起归位，否则还原后仍指向已删的分组。
+    // 多分组之后不能只清 `group_id`：要把这个 id 从每条的 `group_ids` 里摘掉，
+    // 再按剩下的第一个重算主分组。书签量级不大（< 5000），逐条读改写最直白。
+    let rows: Vec<(i64, Option<i64>, String)> =
+        sqlx::query_as("SELECT id, group_id, group_ids FROM bookmarks")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("读取组内书签失败: {e}")))?;
+    // 重算主分组时只认还存在的分组，避免把一条本来就悬空的 id 提成主分组。
+    let known_groups: Vec<i64> = sqlx::query_scalar("SELECT id FROM groups")
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|e| ServerFnError::new(format!("归位组内书签失败: {e}")))?;
+        .map_err(|e| ServerFnError::new(format!("读取分组失败: {e}")))?;
+
+    for (bookmark_id, primary, raw) in rows {
+        // 与 `Bookmark::group_id_list` 用同一个解析器：主分组也参与判断，
+        // 否则"只有 group_id 指向要删的组"的老数据会被漏掉。
+        let ids = crate::models::parse_group_ids(&raw, primary);
+        let references = primary == Some(id) || ids.iter().any(|known| *known == id);
+        if !references {
+            continue;
+        }
+
+        let remaining: Vec<i64> = ids
+            .into_iter()
+            .filter(|known| *known != id && known_groups.contains(known))
+            .collect();
+        let next_primary = remaining.first().copied();
+        let next_raw = remaining
+            .iter()
+            .map(|known| known.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        sqlx::query("UPDATE bookmarks SET group_id = ?, group_ids = ? WHERE id = ?")
+            .bind(next_primary)
+            .bind(next_raw)
+            .bind(bookmark_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("归位组内书签失败: {e}")))?;
+    }
 
     sqlx::query("DELETE FROM groups WHERE id = ?")
         .bind(id)
@@ -893,7 +967,9 @@ pub async fn add_engine(input: NewEngine) -> Result<i64, ServerFnError> {
             .await
             .map_err(|e| ServerFnError::new(format!("检查前缀失败: {e}")))?;
         if clash > 0 {
-            return Err(ServerFnError::new(format!("前缀「{prefix}」已被其他引擎占用")));
+            return Err(ServerFnError::new(format!(
+                "前缀「{prefix}」已被其他引擎占用"
+            )));
         }
     }
 
@@ -923,6 +999,62 @@ pub async fn add_engine(input: NewEngine) -> Result<i64, ServerFnError> {
     }
 
     Ok(id)
+}
+
+/// 修改搜索引擎（名称 / 地址 / 图标 / 前缀）。当前引擎标记不变。
+#[server]
+pub async fn update_engine(id: i64, input: NewEngine) -> Result<(), ServerFnError> {
+    use crate::db;
+
+    let name = input.name.trim().to_string();
+    let url = input.url.trim().to_string();
+    let icon = input.icon.trim().to_string();
+    let prefix = normalize_prefix(&input.prefix);
+
+    if name.is_empty() {
+        return Err(ServerFnError::new("名称不能为空"));
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ServerFnError::new("地址需以 http:// 或 https:// 开头"));
+    }
+    if !url.contains("%s") {
+        return Err(ServerFnError::new("地址必须包含 %s 作为搜索词占位"));
+    }
+
+    let pool = db::pool();
+
+    if !prefix.is_empty() {
+        let clash: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM engines WHERE prefix = ? AND id <> ?")
+                .bind(&prefix)
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .map_err(|e| ServerFnError::new(format!("检查前缀失败: {e}")))?;
+        if clash > 0 {
+            return Err(ServerFnError::new(format!(
+                "前缀「{prefix}」已被其他引擎占用"
+            )));
+        }
+    }
+
+    let affected =
+        sqlx::query("UPDATE engines SET name = ?, url = ?, icon = ?, prefix = ? WHERE id = ?")
+            .bind(name)
+            .bind(url)
+            .bind(icon)
+            .bind(prefix)
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| ServerFnError::new(format!("修改搜索引擎失败: {e}")))?
+            .rows_affected();
+
+    if affected == 0 {
+        return Err(ServerFnError::new("该搜索引擎已不存在"));
+    }
+
+    Ok(())
 }
 
 /// 删除搜索引擎。若删掉的是当前使用的那个，自动回退到列表中第一个。
@@ -1127,20 +1259,19 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         .map_err(|e| ServerFnError::new(format!("读取已有书签失败: {e}")))?;
     let mut seen: std::collections::HashSet<String> = existing.into_iter().collect();
 
-    let mut next_sort: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM bookmarks")
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| ServerFnError::new(format!("计算排序位失败: {e}")))?;
+    let mut next_sort: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM bookmarks")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| ServerFnError::new(format!("计算排序位失败: {e}")))?;
 
     // 已有的分组名 → id，边导入边补
     let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, name FROM groups")
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| ServerFnError::new(format!("读取分组失败: {e}")))?;
-    let mut group_ids: std::collections::HashMap<String, i64> = rows
-        .into_iter()
-        .map(|(id, name)| (name, id))
-        .collect();
+    let mut group_ids: std::collections::HashMap<String, i64> =
+        rows.into_iter().map(|(id, name)| (name, id)).collect();
     let mut next_group_sort: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM groups")
             .fetch_one(&mut *tx)
@@ -1161,11 +1292,20 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
             continue;
         }
 
-        // 备份里的分组名：没有就建一个，保证还原后分组结构还在
-        let group_id = match item.group.trim() {
-            "" => None,
-            name => match group_ids.get(name) {
-                Some(id) => Some(*id),
+        // 备份里的分组名：没有就建一个，保证还原后分组结构还在。
+        // 多分组备份带 `groups`；旧备份只有 `group`，退回单值。
+        let mut wanted: Vec<String> = item.groups.clone();
+        if wanted.is_empty() && !item.group.trim().is_empty() {
+            wanted.push(item.group.trim().to_string());
+        }
+        let mut bookmark_group_ids: Vec<i64> = Vec::new();
+        for name in wanted {
+            let name = name.trim();
+            if name.is_empty() || bookmark_group_ids.len() >= 20 {
+                continue;
+            }
+            let id = match group_ids.get(name) {
+                Some(id) => *id,
                 None => {
                     next_group_sort += 1;
                     let id = sqlx::query_scalar::<_, i64>(
@@ -1177,10 +1317,19 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
                     .await
                     .map_err(|e| ServerFnError::new(format!("创建分组失败: {e}")))?;
                     group_ids.insert(name.to_string(), id);
-                    Some(id)
+                    id
                 }
-            },
-        };
+            };
+            if !bookmark_group_ids.contains(&id) {
+                bookmark_group_ids.push(id);
+            }
+        }
+        let group_id = bookmark_group_ids.first().copied();
+        let group_ids_csv = bookmark_group_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
 
         next_sort += 1;
 
@@ -1200,14 +1349,15 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
 
         sqlx::query(
             "INSERT INTO bookmarks \
-             (title, url, description, tags, group_id, icon, span_w, span_h, sort_order) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (title, url, description, tags, group_id, group_ids, icon, span_w, span_h, sort_order) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(if title.is_empty() { url.clone() } else { title })
         .bind(&url)
         .bind(item.description.trim())
         .bind(normalize_tags(&item.tags))
         .bind(group_id)
+        .bind(&group_ids_csv)
         .bind(item.icon.trim())
         // JSON 备份里的跨度原样搬回（Netscape 解析出来的恒为 1）
         .bind(clamp_span(item.span_w))
@@ -1262,11 +1412,12 @@ pub async fn export_bookmarks_json() -> String {
     let items: Vec<ImportedBookmark> = rows
         .iter()
         .map(|bookmark| {
-            let name = bookmark
-                .group_id
-                .and_then(|id| group_names.get(&id).cloned())
-                .unwrap_or_default();
-            ImportedBookmark::from_bookmark(bookmark, &name)
+            let names: Vec<String> = bookmark
+                .group_id_list()
+                .into_iter()
+                .filter_map(|id| group_names.get(&id).cloned())
+                .collect();
+            ImportedBookmark::from_bookmark(bookmark, &names)
         })
         .collect();
 
@@ -1315,8 +1466,9 @@ pub async fn export_bookmarks_html() -> String {
             url: bookmark.url.clone(),
             description: bookmark.description.clone(),
             group: bookmark
-                .group_id
-                .and_then(|id| group_names.get(&id).cloned())
+                .group_id_list()
+                .first()
+                .and_then(|id| group_names.get(id).cloned())
                 .unwrap_or_default(),
         })
         .collect();
@@ -1432,6 +1584,77 @@ pub async fn get_weather(location: String, fahrenheit: bool) -> Result<Weather, 
         .map_err(ServerFnError::new)
 }
 
+/// 只更新一张组件卡片的参数。
+///
+/// 待办卡片上的勾选/新增走这里：它只改 `config`，不动标题、跨度、底色与顺序，
+/// 因此不必把整张卡片回传，也不会因为客户端持有一份旧快照而把别的字段写回去。
+/// 参数仍按 kind 规范化，脏数据进不了库。
+#[server]
+pub async fn update_widget_config(id: i64, config: String) -> Result<(), ServerFnError> {
+    use crate::db;
+    use crate::models::{
+        CalendarConfig, HotSearchConfig, NoteConfig, TodoConfig, WeatherConfig, KIND_CALENDAR,
+        KIND_HOT, KIND_NOTE, KIND_TODO, KIND_WEATHER,
+    };
+
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM bookmarks WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db::pool())
+        .await
+        .map_err(|e| ServerFnError::new(format!("读取卡片失败: {e}")))?;
+
+    let Some(kind) = kind else {
+        return Err(ServerFnError::new("该卡片已不存在"));
+    };
+
+    let normalized = match kind.as_str() {
+        // 两种时钟的参数在各自的设置表单里改，这里不开放
+        KIND_CALENDAR => CalendarConfig::parse(&config).to_json(),
+        KIND_TODO => TodoConfig::parse(&config).clean().to_json(),
+        KIND_HOT => {
+            let parsed = HotSearchConfig::parse(&config);
+            HotSearchConfig {
+                source: HotSearchConfig::clean_source(&parsed.source),
+            }
+            .to_json()
+        }
+        KIND_NOTE => {
+            let text = NoteConfig::parse(&config).text;
+            NoteConfig {
+                text: NoteConfig::clean(&text),
+            }
+            .to_json()
+        }
+        KIND_WEATHER => {
+            let parsed = WeatherConfig::parse(&config);
+            WeatherConfig {
+                location: WeatherConfig::clean_location(&parsed.location),
+                fahrenheit: parsed.fahrenheit,
+            }
+            .to_json()
+        }
+        _ => return Err(ServerFnError::new("该卡片不是可编辑参数的组件")),
+    };
+
+    sqlx::query("UPDATE bookmarks SET config = ? WHERE id = ?")
+        .bind(normalized)
+        .bind(id)
+        .execute(db::pool())
+        .await
+        .map_err(|e| ServerFnError::new(format!("保存组件参数失败: {e}")))?;
+
+    Ok(())
+}
+
+/// 热搜榜。服务端代取并解析，客户端只拿 `(标题, 地址)`。
+///
+/// `source` 走白名单；服务端只请求写死的地址，不接受客户端传 URL。
+#[server]
+pub async fn get_hot_search(source: String) -> Result<Vec<HotItem>, ServerFnError> {
+    let source = crate::models::HotSearchConfig::clean_source(&source);
+    crate::hot::fetch(&source).await.map_err(ServerFnError::new)
+}
+
 /// 搜索联想。由服务端代取引擎的联想接口（浏览器直连会被 CORS 挡）。
 ///
 /// 入参是**库里引擎的 id**，不是地址——服务端拿 id 反查 URL，再对照
@@ -1463,9 +1686,7 @@ pub async fn suggest(engine_id: i64, query: String) -> Result<Vec<String>, Serve
         return Ok(Vec::new());
     };
 
-    let url = endpoint
-        .url
-        .replace("%s", &suggest::encode_query(query));
+    let url = endpoint.url.replace("%s", &suggest::encode_query(query));
 
     // 单独给更短的超时：联想要跟着输入走，8 秒的通用超时等不起，
     // 慢一点就该当作"这家没有联想"，而不是让列表悬在那里。
@@ -1512,6 +1733,8 @@ mod tests {
                 description TEXT NOT NULL DEFAULT '',
                 tags        TEXT NOT NULL DEFAULT '',
                 group_id    INTEGER,
+                -- 与迁移 007 一致：多分组的完整归属（逗号分隔）
+                group_ids   TEXT NOT NULL DEFAULT '',
                 icon        TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
                 sort_order  INTEGER NOT NULL DEFAULT 0,
@@ -1531,10 +1754,34 @@ mod tests {
         .expect("create table");
 
         let rows = [
-            ("Rust 官网", "https://rust-lang.org", "系统编程语言", "编程,rust", None),
-            ("Dioxus", "https://dioxuslabs.com", "Rust 全栈框架", "rust,web", Some(1)),
-            ("Hacker News", "https://news.ycombinator.com", "科技新闻", "news", None),
-            ("50% off", "https://example.com/sale", "折扣_信息", "shopping", Some(1)),
+            (
+                "Rust 官网",
+                "https://rust-lang.org",
+                "系统编程语言",
+                "编程,rust",
+                None,
+            ),
+            (
+                "Dioxus",
+                "https://dioxuslabs.com",
+                "Rust 全栈框架",
+                "rust,web",
+                Some(1),
+            ),
+            (
+                "Hacker News",
+                "https://news.ycombinator.com",
+                "科技新闻",
+                "news",
+                None,
+            ),
+            (
+                "50% off",
+                "https://example.com/sale",
+                "折扣_信息",
+                "shopping",
+                Some(1),
+            ),
         ];
         for (title, url, desc, tags, group_id) in rows {
             sqlx::query(
@@ -1661,6 +1908,23 @@ mod tests {
         assert_eq!(rust.group_id, None, "未分组是 NULL");
     }
 
+    #[tokio::test]
+    async fn multi_group_ids_are_stored_and_read_back() {
+        let pool = seed().await;
+
+        let mut card = row("多分组", "https://multi.test");
+        card.group_id = Some(1);
+        card.group_ids = "1,2".to_string();
+        let outcome = insert_new_bookmark(&pool, card).await.expect("insert");
+        assert!(outcome.created);
+
+        let items = run(&pool, "").await;
+        let card = items.iter().find(|b| b.title == "多分组").unwrap();
+        assert_eq!(card.group_id, Some(1), "主分组是第一个");
+        assert_eq!(card.group_ids, "1,2");
+        assert_eq!(card.group_id_list(), vec![1, 2]);
+    }
+
     #[test]
     fn tags_normalize() {
         assert_eq!(normalize_tags(" rust , web ,, "), "rust,web");
@@ -1692,6 +1956,7 @@ mod tests {
             description: String::new(),
             tags: String::new(),
             group_id: None,
+            group_ids: String::new(),
             icon: String::new(),
             span_w: 1,
             span_h: 1,
@@ -1709,6 +1974,7 @@ mod tests {
             description: String::new(),
             tags: String::new(),
             group_id: None,
+            group_ids: String::new(),
             icon: String::new(),
             span_w: 2,
             span_h: 2,
@@ -1765,9 +2031,7 @@ mod tests {
         let mut spanning = row("大卡片", "https://big.example");
         spanning.span_w = 2;
         spanning.span_h = 3;
-        let outcome = insert_new_bookmark(&pool, spanning)
-            .await
-            .expect("insert");
+        let outcome = insert_new_bookmark(&pool, spanning).await.expect("insert");
 
         // 列表接口要把它带出来（Bookmark 的 FromRow 列清单里得有这两列）
         let items = run(&pool, "big").await;
@@ -1814,7 +2078,10 @@ mod tests {
 
         // Bookmark 的 FromRow 列清单里得有 surface 这一列
         let items = run(&pool, "").await;
-        let saved = items.iter().find(|card| card.id == outcome.id).expect("找到");
+        let saved = items
+            .iter()
+            .find(|card| card.id == outcome.id)
+            .expect("找到");
         assert_eq!(saved.surface, "solid");
         assert_eq!(saved.surface_class(), "solid");
 
@@ -1835,10 +2102,7 @@ mod tests {
             kind: "rainbow".to_string(),
             ..Default::default()
         };
-        let err = clean_bookmark(&bad)
-            .await
-            .err()
-            .expect("未知类型应被拒收");
+        let err = clean_bookmark(&bad).await.err().expect("未知类型应被拒收");
         assert!(err.contains("不认识的卡片类型"), "实际：{err}");
     }
 
@@ -2011,20 +2275,22 @@ mod tests {
         );
 
         // 改成全新的 URL 放行
-        assert!(
-            ensure_url_not_taken(&pool, 1, "https://brand-new.example")
-                .await
-                .is_ok()
-        );
+        assert!(ensure_url_not_taken(&pool, 1, "https://brand-new.example")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
     async fn quick_add_rejects_non_http_urls() {
         let pool = seed().await;
 
-        assert!(quick_add(&pool, "javascript:alert(1)", "x", "").await.is_err());
+        assert!(quick_add(&pool, "javascript:alert(1)", "x", "")
+            .await
+            .is_err());
         assert!(quick_add(&pool, "", "x", "").await.is_err());
-        assert!(quick_add(&pool, "chrome://bookmarks", "x", "").await.is_err());
+        assert!(quick_add(&pool, "chrome://bookmarks", "x", "")
+            .await
+            .is_err());
         assert_eq!(count(&pool).await, 4, "被拒绝的都没写进去");
     }
 }

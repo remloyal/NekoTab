@@ -2,9 +2,11 @@ use dioxus::prelude::*;
 
 use crate::backend::{add_bookmark, error_text, update_bookmark};
 use crate::models::{
-    clamp_span, widget_label, AddOutcome, Bookmark, ClockConfig, DialConfig, NewBookmark,
-    NoteConfig, WeatherConfig, CARD_SURFACES, KIND_CLOCK, KIND_DIAL, KIND_NOTE, KIND_WEATHER,
-    NOTE_MAX_CHARS, SPAN_MAX, SPAN_PRESETS, WEATHER_MAX_LOCATION_CHARS,
+    clamp_span, widget_label, AddOutcome, Bookmark, CalendarConfig, ClockConfig, DialConfig,
+    HotSearchConfig, NewBookmark, NoteConfig, TodoConfig, TodoItem, WeatherConfig, CARD_SURFACES,
+    HOT_SOURCES, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT, KIND_NOTE, KIND_TODO,
+    KIND_WEATHER, NOTE_MAX_CHARS, SPAN_MAX, SPAN_PRESETS, TODO_MAX_ITEMS, TODO_TEXT_MAX_CHARS,
+    WEATHER_MAX_LOCATION_CHARS,
 };
 
 /// 组件卡片的表单，作为弹窗内容使用。
@@ -29,7 +31,11 @@ pub fn WidgetForm(
         .unwrap_or(kind);
     let editing_id = existing.as_ref().map(|card| card.id);
     let label = widget_label(&kind);
-    let submit_label = if editing_id.is_some() { "保存修改" } else { "添加" };
+    let submit_label = if editing_id.is_some() {
+        "保存修改"
+    } else {
+        "添加"
+    };
 
     // 参数按种类还原；认不出来的种类写法回落默认值。三种参数各解一遍——
     // 只有与当前 kind 对上的那一份会被读到，但都解一次的代价可以忽略，
@@ -42,6 +48,9 @@ pub fn WidgetForm(
     let dial = DialConfig::parse(raw_config);
     let note = NoteConfig::parse(raw_config);
     let weather = WeatherConfig::parse(raw_config);
+    let calendar = CalendarConfig::parse(raw_config);
+    let todo = TodoConfig::parse(raw_config);
+    let hot = HotSearchConfig::parse(raw_config);
 
     let mut title = use_signal(|| {
         existing
@@ -62,6 +71,24 @@ pub fn WidgetForm(
     let mut text = use_signal(|| note.text.clone());
     let mut location = use_signal(|| weather.location.clone());
     let mut fahrenheit = use_signal(|| weather.fahrenheit);
+    let mut cal_lunar = use_signal(|| calendar.show_lunar);
+    let mut cal_monday = use_signal(|| calendar.week_start_monday);
+    let mut hot_source = use_signal(|| hot.source.clone());
+    // 待办用"一行一条"的文本编辑：`[x] ` 前缀表示已完成。比逐个条目的输入框
+    // 更容易批量粘贴，也和记事本的多行文本是一套肌肉记忆。
+    let mut todo_lines = use_signal(|| {
+        todo.items
+            .iter()
+            .map(|item| {
+                if item.done {
+                    format!("[x] {}", item.text)
+                } else {
+                    item.text.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
     // 组件默认占 2×2：它就是要显示内容的，一格放不下
     let mut span_w = use_signal(|| clamp_span(existing.as_ref().map(|c| c.span_w).unwrap_or(2)));
     let mut span_h = use_signal(|| clamp_span(existing.as_ref().map(|c| c.span_h).unwrap_or(2)));
@@ -101,6 +128,7 @@ pub fn WidgetForm(
             description: keep_description.clone(),
             tags: String::new(),
             group_id: None,
+            group_ids: Vec::new(),
             icon: keep_icon.clone(),
             span_w: span_w(),
             span_h: span_h(),
@@ -120,6 +148,19 @@ pub fn WidgetForm(
                 KIND_WEATHER => WeatherConfig {
                     location: location(),
                     fahrenheit: fahrenheit(),
+                }
+                .to_json(),
+                KIND_CALENDAR => CalendarConfig {
+                    show_lunar: cal_lunar(),
+                    week_start_monday: cal_monday(),
+                }
+                .to_json(),
+                KIND_TODO => TodoConfig {
+                    items: parse_todo_lines(&todo_lines()),
+                }
+                .to_json(),
+                KIND_HOT => HotSearchConfig {
+                    source: hot_source(),
                 }
                 .to_json(),
                 _ => String::new(),
@@ -276,6 +317,68 @@ pub fn WidgetForm(
                 }
             }
 
+            if kind == KIND_CALENDAR {
+                div { class: "field",
+                    span { class: "field-label", "显示" }
+                    label { class: "switch",
+                        input {
+                            r#type: "checkbox",
+                            checked: cal_lunar(),
+                            onchange: move |e| cal_lunar.set(e.checked()),
+                        }
+                        span { "显示今天的农历" }
+                    }
+                    label { class: "switch",
+                        input {
+                            r#type: "checkbox",
+                            checked: cal_monday(),
+                            onchange: move |e| cal_monday.set(e.checked()),
+                        }
+                        span { "一周从周一开始" }
+                    }
+                    p { class: "field-hint",
+                        "卡面上可用 ‹ › 切换月份；窗口太窄时日期网格会按格子大小自动缩排。"
+                    }
+                }
+            }
+
+            if kind == KIND_TODO {
+                label { class: "field",
+                    span { class: "field-label", "待办（一行一条）" }
+                    textarea {
+                        class: "input textarea",
+                        rows: "8",
+                        placeholder: "买菜\n写完周报\n[x] 已经做完的事",
+                        value: "{todo_lines}",
+                        oninput: move |e| todo_lines.set(e.value()),
+                    }
+                    p { class: "field-hint",
+                        "最多 {TODO_MAX_ITEMS} 条，每条 {TODO_TEXT_MAX_CHARS} 字。"
+                        "行首写 [x] 表示已完成；卡片上也可以直接勾选。"
+                    }
+                }
+            }
+
+            if kind == KIND_HOT {
+                div { class: "field",
+                    span { class: "field-label", "数据源" }
+                    div { class: "segmented wrap",
+                        for (id, name) in HOT_SOURCES {
+                            button {
+                                key: "{id}",
+                                class: if hot_source() == id { "segment active" } else { "segment" },
+                                r#type: "button",
+                                onclick: move |_| hot_source.set(id.to_string()),
+                                "{name}"
+                            }
+                        }
+                    }
+                    p { class: "field-hint",
+                        "由服务端代取并缓存十分钟，卡片每十分钟刷新一次；取不到时会直接写明原因。"
+                    }
+                }
+            }
+
             div { class: "field",
                 span { class: "field-label", "格子大小" }
                 div { class: "segmented wrap",
@@ -335,5 +438,51 @@ pub fn WidgetForm(
                 }
             }
         }
+    }
+}
+
+/// 把卡片表单里的"一行一条"文本解析成待办列表。
+///
+/// 行首 `[x]` / `[X]` 表示已完成，其余按未完成；空行丢掉，按字符截断并截到上限。
+/// 这是纯函数，单测能直接覆盖那条容易出错的 `[x]` 前缀逻辑。
+fn parse_todo_lines(raw: &str) -> Vec<TodoItem> {
+    raw.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let (done, text) = if let Some(rest) = line
+                .strip_prefix("[x]")
+                .or_else(|| line.strip_prefix("[X]"))
+            {
+                (true, rest.trim())
+            } else {
+                (false, line)
+            };
+            let text: String = text.chars().take(TODO_TEXT_MAX_CHARS).collect();
+            if text.is_empty() {
+                None
+            } else {
+                Some(TodoItem { text, done })
+            }
+        })
+        .take(TODO_MAX_ITEMS)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_todo_lines;
+
+    #[test]
+    fn parses_todo_lines() {
+        let items = parse_todo_lines("买菜\n[x] 周报\n  \n[X] 健身");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].text, "买菜");
+        assert!(!items[0].done);
+        assert!(items[1].done);
+        assert_eq!(items[1].text, "周报");
+        assert!(items[2].done);
     }
 }

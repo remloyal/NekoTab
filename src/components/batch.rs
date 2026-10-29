@@ -12,7 +12,7 @@ pub fn BatchMoveList(
 ) -> Element {
     rsx! {
         div { class: "form",
-            p { class: "confirm-msg", "把选中的 {count} 个书签移到：" }
+            p { class: "confirm-msg", "把选中的 {count} 个书签移到（会替换它们现有的分组）：" }
 
             div { class: "move-list",
                 button {

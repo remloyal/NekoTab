@@ -260,6 +260,16 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
                         // 完整路径进标签（检索用），首层分类进分组（归属用）
                         tags: tags_from_folders(&folders),
                         group: group_from_folders(&folders),
+                        groups: {
+                            // 浏览器文件夹最多取一条分组（与 `group` 一致）；
+                            // 多分组只有本应用的 JSON 备份才有。
+                            let group = group_from_folders(&folders);
+                            if group.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![group]
+                            }
+                        },
                         icon: String::new(),
                         // Netscape 格式没有"跨度"这个概念，导入即 1×1
                         span_w: 1,
@@ -542,6 +552,7 @@ mod tests {
             description: "代码托管".to_string(),
             tags: "dev".to_string(),
             group: "开发".to_string(),
+            groups: vec!["开发".to_string()],
             icon: "i:code".to_string(),
             span_w: 2,
             span_h: 2,

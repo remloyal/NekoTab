@@ -12,8 +12,15 @@ pub struct Bookmark {
     /// 逗号分隔的标签串，如 `"rust,web,工具"`。标签不再是分类（分类见 `Group`），
     /// 只作为检索词，服务端搜索与客户端筛选都会匹配它。
     pub tags: String,
-    /// 归属分组；`None` 即"未分组"（不占一行，由前端合成）
+    /// 主分组；`None` 即"未分组"（不占一行，由前端合成）。
+    ///
+    /// 多分组上线后这一列仍然保留：一条书签可以同时属于多个分组，这里存第一个，
+    /// 供只认识单分组的旧代码（Netscape 导出、快捷添加）使用。完整归属看
+    /// [`Bookmark::group_id_list`]（读 `group_ids`）。
     pub group_id: Option<i64>,
+    /// 全部分组 id，逗号分隔（如 `"3,7"`）；空串表示未分组。
+    #[serde(default)]
+    pub group_ids: String,
     /// 自定义图标。空串表示自动（按 host 代取），其余取值与分组图标同一套约定，
     /// 见 [`crate::components::icons`]：`i:xxx` 内置图标 / `http…` 图片地址 / `/…` 本站路径。
     pub icon: String,
@@ -53,6 +60,15 @@ pub const KIND_NOTE: &str = "note";
 /// 天气组件。
 pub const KIND_WEATHER: &str = "weather";
 
+/// 日历组件。
+pub const KIND_CALENDAR: &str = "calendar";
+
+/// 待办组件。
+pub const KIND_TODO: &str = "todo";
+
+/// 热搜组件。
+pub const KIND_HOT: &str = "hot";
+
 /// 组件类型白名单：`(kind, 显示名, 内置图标 id)`。
 ///
 /// 做成白名单而不是"任意字符串"：`kind` 决定了用哪个组件渲染、参数按哪套规则规范化，
@@ -60,11 +76,14 @@ pub const KIND_WEATHER: &str = "weather";
 ///
 /// 图标取 [`crate::components::icons::GROUP_ICONS`] 的 id，供「添加卡片」弹窗的选卡
 /// 面板用——那一格要是没有图标，就得在渲染处按 kind 再写一次分支。
-pub const WIDGET_KINDS: [(&str, &str, &str); 4] = [
+pub const WIDGET_KINDS: [(&str, &str, &str); 7] = [
     (KIND_CLOCK, "数字时钟", "digital"),
     (KIND_DIAL, "表盘时钟", "clock"),
+    (KIND_CALENDAR, "日历", "calendar"),
+    (KIND_TODO, "待办", "check"),
     (KIND_NOTE, "记事本", "note"),
     (KIND_WEATHER, "天气", "cloud"),
+    (KIND_HOT, "热搜", "search"),
 ];
 
 /// 这个 kind 是不是（已知的）组件。
@@ -85,8 +104,12 @@ pub fn widget_label(kind: &str) -> &'static str {
 ///
 /// 空串不是"没有面"，而是"没设过，用该种类的默认"（见 [`effective_surface`]）。
 /// 这样以后想改默认值，已有的卡片会一起跟上，不必写迁移回填。
-pub const CARD_SURFACES: [(&str, &str); 4] =
-    [("", "默认"), ("none", "无"), ("panel", "半透明"), ("solid", "实底")];
+pub const CARD_SURFACES: [(&str, &str); 4] = [
+    ("", "默认"),
+    ("none", "无"),
+    ("panel", "半透明"),
+    ("solid", "实底"),
+];
 
 /// 没设过面时的默认：**组件卡要一层**（它的内容是文字与细线，压在壁纸上能不能看清
 /// 全看壁纸是什么样），**书签卡不要**（内容是"彩色图标块 + 一行短标题"，图标块自带底色）。
@@ -291,6 +314,154 @@ impl WeatherConfig {
     }
 }
 
+/// 「日历」组件的显示参数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalendarConfig {
+    /// 在标题下显示今天的农历日期
+    #[serde(default = "default_true")]
+    pub show_lunar: bool,
+    /// 一周从周一开始（默认）；关掉从周日开始
+    #[serde(default = "default_true")]
+    pub week_start_monday: bool,
+}
+
+impl Default for CalendarConfig {
+    fn default() -> Self {
+        Self {
+            show_lunar: true,
+            week_start_monday: true,
+        }
+    }
+}
+
+impl CalendarConfig {
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// 待办列表最多几条。
+pub const TODO_MAX_ITEMS: usize = 50;
+/// 单条待办的字符上限。
+pub const TODO_TEXT_MAX_CHARS: usize = 80;
+
+/// 一条待办。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub text: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+/// 「待办」组件的内容。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TodoConfig {
+    #[serde(default)]
+    pub items: Vec<TodoItem>,
+}
+
+impl TodoConfig {
+    /// 从库里的 JSON 串还原；解析不了就回落空列表。
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// 收到合法范围内的待办：逐条去首尾空白、按字符截断、丢空项、截到上限。
+    ///
+    /// 只在服务端落库前调用；表单与卡片上的编辑都只是体验层的限制。
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub fn clean(&self) -> Self {
+        let items = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                let text: String = item.text.trim().chars().take(TODO_TEXT_MAX_CHARS).collect();
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(TodoItem {
+                        text,
+                        done: item.done,
+                    })
+                }
+            })
+            .take(TODO_MAX_ITEMS)
+            .collect();
+        Self { items }
+    }
+
+    /// 已完成 / 总数，卡片上用来显示进度。
+    pub fn progress(&self) -> (usize, usize) {
+        let done = self.items.iter().filter(|item| item.done).count();
+        (done, self.items.len())
+    }
+}
+
+/// 热搜数据源：`(id, 显示名)`。服务端按 id 分流到对应接口。
+pub const HOT_SOURCES: [(&str, &str); 5] = [
+    ("baidu", "百度"),
+    ("zhihu", "知乎"),
+    ("bilibili", "B站"),
+    ("weibo", "微博"),
+    ("toutiao", "头条"),
+];
+
+fn default_hot_source() -> String {
+    "baidu".to_string()
+}
+
+/// 「热搜」组件的参数。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotSearchConfig {
+    #[serde(default = "default_hot_source")]
+    pub source: String,
+}
+
+impl Default for HotSearchConfig {
+    fn default() -> Self {
+        Self {
+            source: default_hot_source(),
+        }
+    }
+}
+
+impl HotSearchConfig {
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// 把数据源收敛到白名单；认不出的回落百度。
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub fn clean_source(value: &str) -> String {
+        let value = value.trim();
+        HOT_SOURCES
+            .iter()
+            .find(|(id, _)| *id == value)
+            .map(|(id, _)| id.to_string())
+            .unwrap_or_else(default_hot_source)
+    }
+}
+
+/// 一条热搜。服务端解析好标题与可点开的地址，客户端只管画。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HotItem {
+    pub title: String,
+    pub url: String,
+}
+
 /// 一次天气查询的结果。服务端填好，客户端只负责画。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Weather {
@@ -340,6 +511,10 @@ pub struct NewBookmark {
     /// 留空表示"未分组"
     #[serde(default)]
     pub group_id: Option<i64>,
+    /// 归属的多个分组；为空表示未分组。服务端会校验、去重，并把第一个写进
+    /// `group_id`（兼容只认识单分组的旧路径）。
+    #[serde(default)]
+    pub group_ids: Vec<i64>,
     /// 留空表示自动取站点图标
     #[serde(default)]
     pub icon: String,
@@ -361,6 +536,14 @@ pub struct NewBookmark {
 }
 
 impl Bookmark {
+    /// 这张卡片归属的分组 id 列表。
+    ///
+    /// `group_ids` 是逗号分隔串（与 `tags` 同一套存储习惯）；老数据只有
+    /// `group_id`，这里会退回读它。解析时去重、丢掉非正数与非法项。
+    pub fn group_id_list(&self) -> Vec<i64> {
+        parse_group_ids(&self.group_ids, self.group_id)
+    }
+
     /// 这张卡片是不是组件。未知 kind 按书签处理——渲染层因此不会碰到没见过的分支。
     pub fn is_widget(&self) -> bool {
         is_widget_kind(&self.kind)
@@ -372,6 +555,28 @@ impl Bookmark {
     pub fn surface_class(&self) -> &'static str {
         effective_surface(&self.surface, self.is_widget())
     }
+}
+
+/// 解析 `group_ids` 逗号串，并补上主分组。
+///
+/// 主分组不在串里时也收进来：旧版本二进制只写 `group_id`，或在回滚后写回
+/// `group_id`，这种情况下"串里没有、主分组有"不应该让书签从它原来的分类里消失。
+/// 新代码写入的两列始终一致，所以这条分支只对历史/混合版本数据起作用。
+pub fn parse_group_ids(raw: &str, primary: Option<i64>) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::new();
+    for part in raw.split(',') {
+        if let Ok(id) = part.trim().parse::<i64>() {
+            if id > 0 && !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    if let Some(id) = primary {
+        if id > 0 && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// 新增书签的结果。
@@ -448,8 +653,7 @@ pub struct Quote {
 }
 
 /// 内置壁纸预设。与 `main.css` 里的 `.bg.preset-*` 一一对应。
-pub const BACKGROUND_PRESETS: [&str; 6] =
-    ["aurora", "nebula", "forest", "ocean", "sunset", "mono"];
+pub const BACKGROUND_PRESETS: [&str; 6] = ["aurora", "nebula", "forest", "ocean", "sunset", "mono"];
 
 /// 背景池最多存几条。
 ///
@@ -512,8 +716,7 @@ pub const SPAN_MAX: i64 = 3;
 
 /// 表单里可选的格子尺寸（宽 × 高）。宽最多 2 列、高最多 3 行，够拼出
 /// 「一张大的 + 一圈小的」这种版面，又不至于一屏放不下几张卡。
-pub const SPAN_PRESETS: [(i64, i64); 6] =
-    [(1, 1), (2, 1), (1, 2), (2, 2), (1, 3), (2, 3)];
+pub const SPAN_PRESETS: [(i64, i64); 6] = [(1, 1), (2, 1), (1, 2), (2, 2), (1, 3), (2, 3)];
 
 /// 把跨度夹到合法范围。0（老备份、表单没传）会被抬到 1，也就是默认的一格。
 pub fn clamp_span(span: i64) -> i64 {
@@ -554,6 +757,18 @@ pub fn columns_for(width: f64, tile_size: i64, gap_x: i64) -> usize {
 /// 主页设置。纯键值存储，加字段不需要迁移（见 `to_pairs` / `from_pairs`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
+    // ---- 站点 ----
+    /// 浏览器标签页标题，同时用于登录页与页面元信息
+    pub site_title: String,
+    /// `<meta name="description">`
+    pub site_description: String,
+    /// `<meta name="keywords">`
+    pub site_keywords: String,
+    /// 站点图标（favicon / logo）：空串用内置图标，其余为 http(s) 或本站路径
+    pub site_logo: String,
+    /// 移动端地址栏主题色，`#rrggbb` 或 `#rgb`
+    pub site_theme_color: String,
+
     // ---- 外观 ----
     /// 背景图片地址；空字符串表示用内置渐变（`background_preset` 或默认渐变）。
     ///
@@ -615,6 +830,12 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            site_title: "NekoTab".to_string(),
+            site_description: "极简自部署书签导航".to_string(),
+            site_keywords: String::new(),
+            site_logo: String::new(),
+            site_theme_color: String::new(),
+
             background_url: String::new(),
             background_urls: Vec::new(),
             background_dim: 35,
@@ -723,6 +944,21 @@ impl Settings {
 
         for (key, value) in pairs {
             match key.as_str() {
+                "site_title" => settings.site_title = clean_setting_text(&value, 60, "NekoTab"),
+                "site_description" => {
+                    settings.site_description =
+                        clean_setting_text(&value, 200, "极简自部署书签导航")
+                }
+                "site_keywords" => settings.site_keywords = clean_setting_text(&value, 200, ""),
+                "site_logo" => settings.site_logo = normalize_site_logo(&value),
+                "site_theme_color" => {
+                    // 空串是"跟随主题"；非法值也落回空串，由渲染层按深浅色取默认。
+                    settings.site_theme_color = if value.trim().is_empty() {
+                        String::new()
+                    } else {
+                        normalize_hex_color(&value).unwrap_or_default()
+                    }
+                }
                 "background_url" => settings.background_url = value,
                 "background_urls" => settings.background_urls = normalize_pool(value.split('\n')),
                 "background_dim" => settings.background_dim = clamp_int(&value, 35, 0, 80),
@@ -796,9 +1032,29 @@ impl Settings {
         let (pool, background_url) = self.normalized_background();
 
         vec![
+            (
+                "site_title",
+                clean_setting_text(&self.site_title, 60, "NekoTab"),
+            ),
+            (
+                "site_description",
+                clean_setting_text(&self.site_description, 200, "极简自部署书签导航"),
+            ),
+            (
+                "site_keywords",
+                clean_setting_text(&self.site_keywords, 200, ""),
+            ),
+            ("site_logo", normalize_site_logo(&self.site_logo)),
+            (
+                "site_theme_color",
+                normalize_hex_color(&self.site_theme_color).unwrap_or_default(),
+            ),
             ("background_url", background_url),
             ("background_urls", pool.join("\n")),
-            ("background_dim", self.background_dim.clamp(0, 80).to_string()),
+            (
+                "background_dim",
+                self.background_dim.clamp(0, 80).to_string(),
+            ),
             ("background_random", bool_str(self.background_random)),
             (
                 "background_preset",
@@ -827,6 +1083,80 @@ impl Settings {
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
 fn parse_bool(value: &str) -> bool {
     value != "0"
+}
+
+/// 站点标题/描述/关键词这类文本：去首尾空白、按字符截断、空则回落默认。
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+fn clean_setting_text(value: &str, max_chars: usize, fallback: &str) -> String {
+    let text: String = value.trim().chars().take(max_chars).collect();
+    if text.is_empty() {
+        fallback.to_string()
+    } else {
+        text
+    }
+}
+
+/// 站点图标：空串合法（用内置图标）；否则只收 http(s) 或本站路径。
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+fn normalize_site_logo(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty()
+        || value.starts_with("http://")
+        || value.starts_with("https://")
+        || value.starts_with('/')
+    {
+        value.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// 把 `#rgb` / `#rrggbb` 收敛成小写 `#rrggbb`；非法返回 `None`。
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub fn normalize_hex_color(value: &str) -> Option<String> {
+    let value = value.trim().trim_start_matches('#');
+    let expanded = match value.len() {
+        3 if value.chars().all(|c| c.is_ascii_hexdigit()) => {
+            let mut out = String::with_capacity(7);
+            out.push('#');
+            for ch in value.chars() {
+                out.push(ch);
+                out.push(ch);
+            }
+            out
+        }
+        6 if value.chars().all(|c| c.is_ascii_hexdigit()) => format!("#{value}"),
+        _ => return None,
+    };
+    Some(expanded.to_ascii_lowercase())
+}
+
+/// 文字图标的值前缀，落库形如 `t:#5b8cff:猫`。
+///
+/// 文字图标和内置图标、图片地址共用同一个 `icon` 字段，理由与分组图标相同：
+/// 加一列要迁移、要改所有读写路径，而这里只是多一种字符串格式。
+pub const TEXT_ICON_PREFIX: &str = "t:";
+
+/// 拆开文字图标值：`(颜色, 文字)`。不是文字图标或格式非法返回 `None`。
+pub fn text_icon_parts(value: &str) -> Option<(String, String)> {
+    let rest = value.strip_prefix(TEXT_ICON_PREFIX)?;
+    let (color, text) = rest.split_once(':')?;
+    let color = normalize_hex_color(color)?;
+    let text: String = text.trim().chars().take(2).collect();
+    if text.is_empty() {
+        return None;
+    }
+    Some((color, text))
+}
+
+/// 由颜色与文字拼出可落库的文字图标值；非法输入返回 `None`。
+pub fn text_icon_value(color: &str, text: &str) -> Option<String> {
+    let color = normalize_hex_color(color)?;
+    let text: String = text.trim().chars().take(2).collect();
+    if text.is_empty() {
+        return None;
+    }
+    Some(format!("{TEXT_ICON_PREFIX}{color}:{text}"))
 }
 
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
@@ -871,9 +1201,12 @@ pub struct ImportedBookmark {
     pub description: String,
     #[serde(default)]
     pub tags: String,
-    /// 分组名（导出时写成名字而非 id，跨库导入才能对上）
+    /// 分组名（首个，兼容旧备份）
     #[serde(default)]
     pub group: String,
+    /// 全部分组名（多分组备份）。旧备份没有这一项时，导入端会退回 `group`。
+    #[serde(default)]
+    pub groups: Vec<String>,
     /// 自定义图标（与 `Bookmark::icon` 同一套约定）
     #[serde(default)]
     pub icon: String,
@@ -894,13 +1227,14 @@ pub struct ImportedBookmark {
 
 #[cfg(feature = "server")]
 impl ImportedBookmark {
-    pub fn from_bookmark(bookmark: &Bookmark, group_name: &str) -> Self {
+    pub fn from_bookmark(bookmark: &Bookmark, group_names: &[String]) -> Self {
         Self {
             title: bookmark.title.clone(),
             url: bookmark.url.clone(),
             description: bookmark.description.clone(),
             tags: bookmark.tags.clone(),
-            group: group_name.to_string(),
+            group: group_names.first().cloned().unwrap_or_default(),
+            groups: group_names.to_vec(),
             icon: bookmark.icon.clone(),
             span_w: bookmark.span_w,
             span_h: bookmark.span_h,
@@ -925,6 +1259,11 @@ mod tests {
     #[test]
     fn settings_round_trip_is_stable() {
         let original = Settings {
+            site_title: "我的导航".to_string(),
+            site_description: "一个测试站点".to_string(),
+            site_keywords: "书签,测试".to_string(),
+            site_logo: "/logo.png".to_string(),
+            site_theme_color: "#123456".to_string(),
             background_url: "https://example.com/a.jpg".to_string(),
             background_urls: vec![
                 "https://example.com/a.jpg".to_string(),
@@ -1003,24 +1342,15 @@ mod tests {
         ];
 
         // 没设当前地址 → 池首
-        assert_eq!(
-            settings.normalized_background().1,
-            "https://a.test/1.jpg"
-        );
+        assert_eq!(settings.normalized_background().1, "https://a.test/1.jpg");
 
         // 设了一条不在池里的 → 也是池首
         settings.background_url = "https://a.test/ghost.jpg".to_string();
-        assert_eq!(
-            settings.normalized_background().1,
-            "https://a.test/1.jpg"
-        );
+        assert_eq!(settings.normalized_background().1, "https://a.test/1.jpg");
 
         // 池里有的照原样保留
         settings.background_url = "https://a.test/2.jpg".to_string();
-        assert_eq!(
-            settings.normalized_background().1,
-            "https://a.test/2.jpg"
-        );
+        assert_eq!(settings.normalized_background().1, "https://a.test/2.jpg");
     }
 
     /// 池有条数上限，超出的截掉；单条超长的直接丢。
@@ -1072,10 +1402,8 @@ mod tests {
         assert_eq!(Settings::from_pairs(pairs).background_preset, "");
 
         // 已知预设照常保留
-        let known = Settings::from_pairs(vec![(
-            "background_preset".to_string(),
-            "ocean".to_string(),
-        )]);
+        let known =
+            Settings::from_pairs(vec![("background_preset".to_string(), "ocean".to_string())]);
         assert_eq!(known.background_preset, "ocean");
     }
 
@@ -1098,8 +1426,16 @@ mod tests {
     fn grid_columns_css() {
         let mut settings = Settings::default();
         assert_eq!(settings.grid_template_columns(), "repeat(auto-fit, 96px)");
-        assert_eq!(settings.grid_max_width(), "none", "列数 0 表示不限，不加上限");
-        assert_eq!(settings.stage_max_width(), "940px", "列数不限时保持基准宽度");
+        assert_eq!(
+            settings.grid_max_width(),
+            "none",
+            "列数 0 表示不限，不加上限"
+        );
+        assert_eq!(
+            settings.stage_max_width(),
+            "940px",
+            "列数不限时保持基准宽度"
+        );
 
         settings.grid_columns = 5;
         settings.tile_size = 80;
@@ -1195,7 +1531,11 @@ mod tests {
 
         // 空串（书签那一侧的取值）、乱码、非对象 JSON 一律回落默认，不许 panic
         for junk in ["", "not json", "[]", "123", "null"] {
-            assert_eq!(ClockConfig::parse(junk), default, "脏数据 {junk:?} 应回落默认");
+            assert_eq!(
+                ClockConfig::parse(junk),
+                default,
+                "脏数据 {junk:?} 应回落默认"
+            );
         }
     }
 
@@ -1225,7 +1565,11 @@ mod tests {
         assert!(!default.fahrenheit, "默认摄氏度");
 
         for junk in ["", "not json", "[]", "123", "null"] {
-            assert_eq!(WeatherConfig::parse(junk), default, "脏数据 {junk:?} 应回落默认");
+            assert_eq!(
+                WeatherConfig::parse(junk),
+                default,
+                "脏数据 {junk:?} 应回落默认"
+            );
         }
 
         assert_eq!(WeatherConfig::clean_location("  北京  "), "北京");
@@ -1245,7 +1589,9 @@ mod tests {
     #[test]
     fn weather_codes_have_a_label_and_an_icon() {
         // 每一档都要有说法和图示，且认不出的代码不能回落到空串
-        for code in [0u32, 1, 2, 3, 45, 48, 51, 55, 61, 65, 71, 77, 82, 86, 95, 99] {
+        for code in [
+            0u32, 1, 2, 3, 45, 48, 51, 55, 61, 65, 71, 77, 82, 86, 95, 99,
+        ] {
             let (label, icon) = weather_label(code);
             assert!(!label.is_empty(), "代码 {code} 没有描述");
             assert_ne!(label, "未知", "代码 {code} 应该是认得的");
@@ -1264,7 +1610,11 @@ mod tests {
         assert!(!default.show_numbers, "默认用短线刻度");
 
         for junk in ["", "not json", "[]", "123", "null"] {
-            assert_eq!(DialConfig::parse(junk), default, "脏数据 {junk:?} 应回落默认");
+            assert_eq!(
+                DialConfig::parse(junk),
+                default,
+                "脏数据 {junk:?} 应回落默认"
+            );
         }
     }
 
@@ -1290,7 +1640,11 @@ mod tests {
     fn note_config_falls_back_to_empty_on_junk() {
         let empty = NoteConfig::default();
         for junk in ["", "not json", "[]", "123", "null"] {
-            assert_eq!(NoteConfig::parse(junk), empty, "脏数据 {junk:?} 应回落空笔记");
+            assert_eq!(
+                NoteConfig::parse(junk),
+                empty,
+                "脏数据 {junk:?} 应回落空笔记"
+            );
         }
     }
 
@@ -1305,7 +1659,11 @@ mod tests {
     #[test]
     fn note_text_is_trimmed_and_capped() {
         assert_eq!(NoteConfig::clean("  你好  "), "你好", "首尾空白去掉");
-        assert_eq!(NoteConfig::clean("a\n\nb"), "a\n\nb", "中间的换行与空行要保留");
+        assert_eq!(
+            NoteConfig::clean("a\n\nb"),
+            "a\n\nb",
+            "中间的换行与空行要保留"
+        );
 
         // 超长按**字符**截断：中文一个字三字节，按字节切会切出半个字
         let long = "字".repeat(NOTE_MAX_CHARS + 50);
@@ -1359,6 +1717,7 @@ mod tests {
             description: String::new(),
             tags: String::new(),
             group_id: None,
+            group_ids: String::new(),
             icon: String::new(),
             created_at: String::new(),
             span_w: 1,
@@ -1378,10 +1737,25 @@ mod tests {
     }
 
     #[test]
-    fn system_theme_resolves() {        let mut settings = Settings::default();
+    fn group_ids_union_primary() {
+        assert_eq!(parse_group_ids("1,2", Some(1)), vec![1, 2]);
+        // 混合版本：旧二进制只改 group_id，主分组不在串里时也要保留
+        assert_eq!(parse_group_ids("1,2", Some(3)), vec![1, 2, 3]);
+        assert_eq!(parse_group_ids("abc", Some(5)), vec![5]);
+        assert_eq!(parse_group_ids("2,2,0,-1", None), vec![2]);
+        assert!(parse_group_ids("", None).is_empty());
+    }
+
+    #[test]
+    fn system_theme_resolves() {
+        let mut settings = Settings::default();
 
         settings.theme = "light".to_string();
-        assert_eq!(settings.effective_theme(Some(true)), "light", "定死浅色不看系统");
+        assert_eq!(
+            settings.effective_theme(Some(true)),
+            "light",
+            "定死浅色不看系统"
+        );
 
         settings.theme = "system".to_string();
         assert_eq!(settings.effective_theme(Some(true)), "dark");
