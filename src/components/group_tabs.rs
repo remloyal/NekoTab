@@ -70,8 +70,10 @@ pub fn GroupTabs(tabs: Vec<GroupTab>, active: String, on_select: EventHandler<St
 
 /// 按分组的自定义顺序，把「全部 / 未分组 / 各分组」拼成标签页。
 ///
-/// 没有书签的分组不出现（和原来"空标签自动消失"的行为一致），
-/// 但只要库里还有未分组的书签，「未分组」这一项就始终在。
+/// **所有分组都显示**，包括还没有书签的空分组（计数为 0）。早先是"空标签自动
+/// 消失"，但新建分组后它立刻从页面上不见了，用户会以为没建成；空分组留在
+/// 标签栏里，点进去显示空态，反而能说明"分组在、只是还没放书签"。
+/// 「未分组」是合成项，仍然只在真有未分组书签时出现。
 ///
 /// `total` 是结果集里**书签的条数**，不是 `counts` 的和：多分组书签会在多个
 /// 分组下各计一次，加起来会大于「全部」。
@@ -100,9 +102,6 @@ pub fn build_tabs(
     for group in groups {
         let value = group_value(group.id);
         let count = counts.get(&value).copied().unwrap_or(0);
-        if count == 0 {
-            continue;
-        }
         tabs.push(GroupTab {
             label: group.name.clone(),
             value,
@@ -138,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn tabs_skip_empty_groups_but_keep_ungrouped() {
+    fn tabs_include_empty_groups_and_keep_ungrouped() {
         let groups = vec![group(1, "开发"), group(2, "空分组")];
         let mut counts: HashMap<String, usize> = HashMap::new();
         counts.insert(GROUP_UNGROUPED.to_string(), 2);
@@ -150,11 +149,11 @@ mod tests {
         let tabs = build_tabs(&groups, &counts, total);
         let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
 
-        assert_eq!(labels, vec!["全部", "未分组", "开发"]);
+        assert_eq!(labels, vec!["全部", "未分组", "开发", "空分组"]);
         assert_eq!(tabs[0].count, 4, "全部用书签数，不重复计数");
         assert_eq!(counts.values().sum::<usize>(), 5, "分组计数允许大于总数");
         assert_eq!(tabs[2].count, 3);
-        assert!(!labels.contains(&"空分组"), "没有书签的分组不出现");
+        assert_eq!(tabs[3].count, 0, "新建的空分组也要出现在标签栏里");
     }
 
     #[test]
