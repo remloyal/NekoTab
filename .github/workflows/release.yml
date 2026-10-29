@@ -91,8 +91,11 @@ jobs:
       - name: 安装构建依赖
         run: |
           sudo apt-get update
+          # libc6-dev-arm64-cross 必须显式装：gcc-aarch64-linux-gnu 只是 Recommend 它，
+          # 用了 --no-install-recommends 就会漏掉，交叉编译时找不到 bits/libc-header-start.h。
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libssl-dev gcc-aarch64-linux-gnu
+            pkg-config libssl-dev gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross linux-libc-dev-arm64-cross
           if ! command -v dx >/dev/null 2>&1; then
             cargo install dioxus-cli --version "$DX_VERSION" --locked
           fi

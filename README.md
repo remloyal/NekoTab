@@ -712,8 +712,8 @@ git push origin v0.2.0
 发布流程做的事：
 
 1. 用 `scripts/pack-linux.sh` 构建 **amd64 + arm64** 的 Linux 产物：客户端 wasm 只编
-   一次，服务端在 amd64 上原生编、在 arm64 上交叉编（装 `gcc-aarch64-linux-gnu`），
-   不走 QEMU 模拟编译。
+   一次，服务端在 amd64 上原生编、在 arm64 上交叉编（`gcc-aarch64-linux-gnu` +
+   `libc6-dev-arm64-cross`），不走 QEMU 模拟编译。
 2. 用 `Dockerfile.prebuilt` 打成多架构镜像并推送：
    - `ghcr.io/remloyal/nekotab`（用 `GITHUB_TOKEN`，无需额外配置）
    - `remloyal001/nekotab`（**可选**，见下方 secrets）
