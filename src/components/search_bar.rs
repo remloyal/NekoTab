@@ -3,8 +3,9 @@ use dioxus::prelude::*;
 use super::engine_logo::engine_logo;
 #[cfg(feature = "web")]
 use crate::backend::suggest;
+use crate::backend::{clear_search_history, list_search_history, record_search};
 use crate::engine::build_search_url;
-use crate::models::Engine;
+use crate::models::{Engine, SearchHistory};
 
 /// 输入停止后多久才去要联想。太短会把每个字母都发出去，太长会觉得迟钝。
 /// 只在 web 侧用得上（防抖靠 gloo-timers）。
@@ -44,6 +45,18 @@ fn kick_suggest(
     _token: Signal<u32>,
     _remote: Signal<Vec<String>>,
 ) {
+}
+
+/// 把一次真实的搜索记进服务端历史，成功后让历史资源重查。
+///
+/// 历史写在 SQLite 里而不是浏览器存储：换设备、清缓存都不会把「最近搜过什么」
+/// 带走。失败一律静默——搜索已经在新标签页打开了，历史存不进去不该打断它。
+fn remember(mut refresh: Signal<u32>, query: String, engine_id: i64) {
+    spawn(async move {
+        if record_search(query, engine_id).await.is_ok() {
+            refresh.set(refresh() + 1);
+        }
+    });
 }
 
 /// 搜索框的两种用途。
@@ -127,6 +140,22 @@ pub fn SearchBar(
     let mut highlight = use_signal(|| Option::<usize>::None);
     // 被主动收起过（Esc / 选完一项 / 焦点离开）：在输入再次变化前不再弹出来
     let mut dismissed = use_signal(|| false);
+    // 输入框是否聚焦。首屏 autofocus 会把焦点送进来，初值先按 true 算，
+    // 否则历史面板要等用户再点一下输入框才出现。
+    let mut focused = use_signal(|| true);
+    // 历史列表的重查令牌（记录一条、清空之后 +1）
+    let history_refresh = use_signal(|| 0u32);
+    // 历史面板的高亮行，与联想面板的 `highlight` 分开
+    let mut history_highlight = use_signal(|| Option::<usize>::None);
+
+    let history_res = use_resource(move || async move {
+        let _ = history_refresh();
+        list_search_history().await
+    });
+    let history_items: Vec<SearchHistory> = match (&*history_res.read()).clone() {
+        Some(Ok(list)) => list,
+        _ => Vec::new(),
+    };
 
     let active = engines
         .iter()
@@ -160,13 +189,24 @@ pub fn SearchBar(
     let show_panel =
         mode == SearchMode::Web && !dismissed() && !value.trim().is_empty() && !items.is_empty();
 
+    // ---- 历史面板 ----
+    // 只在「搜网页」且输入框为空时出现：一旦开始输入，那个位置让给联想词；
+    // 筛书签模式下方网格才是主体，不弹历史。
+    let show_history = mode == SearchMode::Web
+        && focused()
+        && !dismissed()
+        && value.trim().is_empty()
+        && !history_items.is_empty();
+
     // 闭包体里把 Signal 拷成局部再 set：Signal 是 Copy，这样闭包本身就只是 `Fn`
     // （而不是 `FnMut`），才能在多个事件回调里反复调用而不用到处 `mut`/克隆。
     let dismiss = move || {
         let mut dismissed = dismissed;
         let mut highlight = highlight;
+        let mut history_highlight = history_highlight;
         dismissed.set(true);
         highlight.set(None);
+        history_highlight.set(None);
     };
 
     // 选了某个联想词：拿它去搜（一律开新标签页，别顶掉当前书签页）
@@ -179,7 +219,37 @@ pub fn SearchBar(
         if let Some(engine) = engine_for_pick.as_ref() {
             let url = build_search_url(&engine.url, &word);
             crate::dom::open_url(&url, true);
+            remember(history_refresh, word, engine.id);
         }
+    };
+
+    // 回放一条历史：优先用当时那台引擎；引擎被删了就回落到当前引擎。
+    let engines_for_replay = engines.clone();
+    let active_for_replay = active.clone();
+    let replay = move |item: SearchHistory| {
+        let engine = engines_for_replay
+            .iter()
+            .find(|engine| engine.id == item.engine_id)
+            .cloned()
+            .or_else(|| active_for_replay.clone());
+        let Some(engine) = engine else {
+            return;
+        };
+        let url = build_search_url(&engine.url, &item.query);
+        crate::dom::open_url(&url, true);
+        remember(history_refresh, item.query, engine.id);
+    };
+
+    // 清空历史：列表已经没了，面板自然收起；不必额外确认，它只是搜索记录。
+    let clear_history = move |_| {
+        let mut history_refresh = history_refresh;
+        let mut history_highlight = history_highlight;
+        spawn(async move {
+            if clear_search_history().await.is_ok() {
+                history_highlight.set(None);
+                history_refresh.set(history_refresh() + 1);
+            }
+        });
     };
 
     let engine_for_suggest = submit_engine.clone();
@@ -193,12 +263,16 @@ pub fn SearchBar(
             target: "_blank",
             onsubmit: {
                 let target_url = action.clone();
+                let submit_query = submit_query.clone();
+                let engine_id = submit_engine.as_ref().map(|engine| engine.id).unwrap_or(0);
                 move |evt| {
                     // 拦掉原生提交（它会把查询串清空），改由 JS 精确打开
                     evt.prevent_default();
-                    if !target_url.is_empty() {
+                    // 空输入时历史面板正好开着，回车不该顺手搜一个空词
+                    if can_submit && !target_url.is_empty() {
                         // 搜索一律开新标签页：用当前页去搜会把书签页顶掉
                         crate::dom::open_url(&target_url, true);
+                        remember(history_refresh, submit_query.clone(), engine_id);
                     }
                 }
             },
@@ -283,12 +357,19 @@ pub fn SearchBar(
                     // 故意不给 name：提交时不会往 action 上再拼参数
                     placeholder: if mode == SearchMode::Web { "搜一搜，看一看" } else { "在书签里找…" },
                     value: "{value}",
+                    // 点回输入框时让面板重新出现（比如刚用 Esc 收起过）
+                    onclick: move |_| dismissed.set(false),
+                    onfocus: move |_| {
+                        focused.set(true);
+                        dismissed.set(false);
+                    },
                     oninput: move |evt| {
                         let text = evt.value();
                         oninput.call(text.clone());
 
                         // 输入变了：旧面板状态作废，重新要一次联想
                         highlight.set(None);
+                        history_highlight.set(None);
                         dismissed.set(false);
                         remote.set(Vec::new());
                         let next = token() + 1;
@@ -304,6 +385,8 @@ pub fn SearchBar(
                     onkeydown: {
                         let items = items.clone();
                         let pick = pick.clone();
+                        let history_items = history_items.clone();
+                        let replay = replay.clone();
                         move |evt| match evt.key() {
                             // 上下键在联想里移动高亮；没有联想时不要拦，
                             // 让方向键继续去做翻页（根节点的快捷键）
@@ -335,12 +418,44 @@ pub fn SearchBar(
                                 evt.stop_propagation();
                                 dismiss();
                             }
+                            // 历史面板同样支持上下键与回车（空输入时才出现）
+                            Key::ArrowDown if show_history => {
+                                evt.prevent_default();
+                                let next = match history_highlight() {
+                                    Some(index) => (index + 1).min(history_items.len() - 1),
+                                    None => 0,
+                                };
+                                history_highlight.set(Some(next));
+                            }
+                            Key::ArrowUp if show_history => {
+                                evt.prevent_default();
+                                history_highlight.set(Some(match history_highlight() {
+                                    Some(0) | None => 0,
+                                    Some(index) => index - 1,
+                                }));
+                            }
+                            Key::Enter if show_history => {
+                                if let Some(index) = history_highlight() {
+                                    if let Some(item) = history_items.get(index) {
+                                        evt.prevent_default();
+                                        replay(item.clone());
+                                    }
+                                }
+                            }
+                            Key::Escape if show_history => {
+                                evt.prevent_default();
+                                evt.stop_propagation();
+                                dismiss();
+                            }
                             _ => {}
                         }
                     },
                     // 焦点离开就收起。面板里那些行在 mousedown 时拦了默认行为，
                     // 所以点它们不会先触发这里的 blur。
-                    onblur: move |_| dismiss(),
+                    onblur: move |_| {
+                        focused.set(false);
+                        dismiss();
+                    },
                 }
 
                 if !value.is_empty() {
@@ -348,11 +463,16 @@ pub fn SearchBar(
                         class: "search-go",
                         r#type: "button",
                         title: "清空",
+                        // 拦住 mousedown：点这个按钮时输入框不 blur，清空后历史面板能留在原处
+                        onmousedown: move |evt| evt.prevent_default(),
                         onclick: move |_| {
                             oninput.call(String::new());
                             remote.set(Vec::new());
                             token.set(token() + 1);
-                            dismiss();
+                            highlight.set(None);
+                            history_highlight.set(None);
+                            dismissed.set(false);
+                            crate::dom::focus_element(SEARCH_INPUT_ID);
                         },
                         "✕"
                     }
@@ -403,6 +523,57 @@ pub fn SearchBar(
                                         },
                                         span { class: "suggest-icon", "⌕" }
                                         span { class: "suggest-text", "{item}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 历史面板：空输入 + 聚焦时出现。与联想面板同一个位置、同一套行样式，
+                // 两者不会同时显示（有输入才有联想，有历史才空输入）。
+                if show_history {
+                    div { class: "suggest-panel history-panel",
+                        div { class: "history-head",
+                            span { class: "history-title", "最近搜索" }
+                            button {
+                                class: "history-clear",
+                                r#type: "button",
+                                title: "清空搜索历史",
+                                onmousedown: move |evt| evt.prevent_default(),
+                                onclick: move |evt| {
+                                    evt.stop_propagation();
+                                    clear_history(());
+                                },
+                                "清空"
+                            }
+                        }
+                        for (index, item) in history_items.iter().enumerate() {
+                            {
+                                let item = item.clone();
+                                // 引擎可能已经被删掉，找不到就不显示右侧的引擎名
+                                let engine_name = engines
+                                    .iter()
+                                    .find(|engine| engine.id == item.engine_id)
+                                    .map(|engine| engine.name.clone());
+                                let replay = replay.clone();
+                                rsx! {
+                                    button {
+                                        key: "{item.id}",
+                                        class: if history_highlight() == Some(index) { "suggest-item history-item active" } else { "suggest-item history-item" },
+                                        r#type: "button",
+                                        title: "用当时的引擎再搜一次",
+                                        // 同联想行：拦住默认行为，点的时候输入框不先 blur
+                                        onmousedown: move |evt| evt.prevent_default(),
+                                        onclick: move |_| {
+                                            replay(item.clone());
+                                            dismiss();
+                                        },
+                                        span { class: "suggest-icon", "↺" }
+                                        span { class: "suggest-text", "{item.query}" }
+                                        if let Some(name) = engine_name {
+                                            span { class: "history-engine", "{name}" }
+                                        }
                                     }
                                 }
                             }

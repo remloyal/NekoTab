@@ -645,6 +645,32 @@ pub struct NewEngine {
     pub prefix: String,
 }
 
+/// 搜索历史最多保留多少条。
+///
+/// 新记录插在最前（id 最大），超出部分从尾部删掉，见 `backend::push_search_history`。
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub const SEARCH_HISTORY_MAX: usize = 100;
+
+/// 单条搜索词的长度上限（字符数）。
+///
+/// 粘贴一整段文本去搜时，原样存进去只会让面板一行都放不下，也没有回放价值。
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub const SEARCH_HISTORY_QUERY_MAX: usize = 200;
+
+/// 一条搜索历史。
+///
+/// 存在服务端 SQLite（`search_history` 表），不写浏览器存储。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(sqlx::FromRow))]
+pub struct SearchHistory {
+    pub id: i64,
+    /// 实际用来搜索的词（不含 `gh` 这类引擎前缀）
+    pub query: String,
+    /// 当时使用的引擎 id；引擎被删掉后这里可能指向不存在的行，界面回落到当前引擎
+    pub engine_id: i64,
+    pub created_at: String,
+}
+
 /// 一条「一言」。来源可能是作者，也可能是作品名，故 `source` 已拼好。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Quote {

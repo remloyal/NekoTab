@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 use crate::models::{
     AddOutcome, Bookmark, Engine, Group, HotItem, ImportReport, NewBookmark, NewEngine, NewGroup,
-    Quote, Settings, TrashItem, Weather,
+    Quote, SearchHistory, Settings, TrashItem, Weather,
 };
 // 只在服务端的入库校验里用到（客户端的夹取在组件层）
 #[cfg(feature = "server")]
@@ -1711,6 +1711,110 @@ pub async fn suggest(engine_id: i64, query: String) -> Result<Vec<String>, Serve
     Ok(items)
 }
 
+// ---------------------------------------------------------------------------
+// 搜索历史
+// ---------------------------------------------------------------------------
+//
+// 历史存服务端（SQLite），不写 localStorage：换设备/清缓存不会带走，也不受
+// 浏览器存储配额限制。写入时同词删旧插新，于是 id 最大的那条天然是"最近搜过"，
+// 排序只按 id 就够了。
+
+/// 写入一条搜索历史，并裁到 [`crate::models::SEARCH_HISTORY_MAX`] 条。
+///
+/// 收 `pool` 而不是直接用全局连接池，便于单测里喂内存库（同 `insert_new_bookmark`）。
+/// 同一句话（去掉首尾空白后完全相同）只保留一条：先删旧再插入，因此重复搜索会
+/// 把它顶到最前面，而不是占掉两条名额。
+#[cfg(feature = "server")]
+pub(crate) async fn push_search_history(
+    pool: &sqlx::SqlitePool,
+    query: &str,
+    engine_id: i64,
+) -> Result<(), String> {
+    use crate::models::{SEARCH_HISTORY_MAX, SEARCH_HISTORY_QUERY_MAX};
+
+    let query = query.trim();
+    if query.is_empty() {
+        // 空白搜索不会发生（前端禁用提交），这里只做兜底，不必当错误
+        return Ok(());
+    }
+    let query: String = query.chars().take(SEARCH_HISTORY_QUERY_MAX).collect();
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("开始事务失败: {e}"))?;
+
+    sqlx::query("DELETE FROM search_history WHERE query = ?")
+        .bind(&query)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("清理旧搜索历史失败: {e}"))?;
+
+    sqlx::query("INSERT INTO search_history (query, engine_id) VALUES (?, ?)")
+        .bind(&query)
+        .bind(engine_id.max(0))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("保存搜索历史失败: {e}"))?;
+
+    // 只留最近的 N 条。id 是自增的，等于按写入时间倒序。
+    sqlx::query(
+        "DELETE FROM search_history WHERE id NOT IN \
+         (SELECT id FROM search_history ORDER BY id DESC LIMIT ?)",
+    )
+    .bind(SEARCH_HISTORY_MAX as i64)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("裁剪搜索历史失败: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("提交搜索历史失败: {e}"))?;
+
+    Ok(())
+}
+
+/// 最近的搜索历史，新的在前，最多 100 条。
+#[server]
+pub async fn list_search_history() -> Result<Vec<SearchHistory>, ServerFnError> {
+    use crate::db;
+    use crate::models::SEARCH_HISTORY_MAX;
+
+    sqlx::query_as::<_, SearchHistory>(
+        "SELECT id, query, engine_id, created_at FROM search_history \
+         ORDER BY id DESC LIMIT ?",
+    )
+    .bind(SEARCH_HISTORY_MAX as i64)
+    .fetch_all(db::pool())
+    .await
+    .map_err(|e| ServerFnError::new(format!("读取搜索历史失败: {e}")))
+}
+
+/// 记一次搜索。`query` 是实际用于搜索的词（不含引擎前缀），`engine_id` 是当时的引擎。
+///
+/// 失败不该打断搜索本身（新标签页已经开了），所以调用方只把它当尽力而为。
+#[server]
+pub async fn record_search(query: String, engine_id: i64) -> Result<(), ServerFnError> {
+    use crate::db;
+
+    push_search_history(db::pool(), &query, engine_id)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+/// 清空全部搜索历史。
+#[server]
+pub async fn clear_search_history() -> Result<(), ServerFnError> {
+    use crate::db;
+
+    sqlx::query("DELETE FROM search_history")
+        .execute(db::pool())
+        .await
+        .map_err(|e| ServerFnError::new(format!("清空搜索历史失败: {e}")))?;
+
+    Ok(())
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
@@ -2292,5 +2396,100 @@ mod tests {
             .await
             .is_err());
         assert_eq!(count(&pool).await, 4, "被拒绝的都没写进去");
+    }
+
+    /// 搜索历史用的最小库：与迁移 008 同构。
+    async fn history_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query(
+            "CREATE TABLE search_history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                query      TEXT NOT NULL,
+                engine_id  INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create search_history");
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn search_history_dedupes_and_moves_to_front() {
+        let pool = history_pool().await;
+
+        push_search_history(&pool, "rust", 1).await.unwrap();
+        push_search_history(&pool, "dioxus", 2).await.unwrap();
+        // 重复搜索：只留一条，并回到最前；引擎跟着这次实际使用的走
+        push_search_history(&pool, "  rust  ", 3).await.unwrap();
+
+        let rows: Vec<(String, i64)> =
+            sqlx::query_as("SELECT query, engine_id FROM search_history ORDER BY id DESC")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![("rust".to_string(), 3), ("dioxus".to_string(), 2)],
+            "去重后只剩两条，最近一次排最前"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_history_keeps_at_most_100_and_trims_long_queries() {
+        let pool = history_pool().await;
+
+        for index in 0..105 {
+            push_search_history(&pool, &format!("q{index}"), 1)
+                .await
+                .unwrap();
+        }
+
+        let (total, newest, oldest): (i64, String, String) = sqlx::query_as(
+            "SELECT COUNT(*), \
+                    (SELECT query FROM search_history ORDER BY id DESC LIMIT 1), \
+                    (SELECT query FROM search_history ORDER BY id ASC LIMIT 1) \
+             FROM search_history",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(total, 100);
+        assert_eq!(newest, "q104");
+        assert_eq!(oldest, "q5", "最早的 5 条被裁掉");
+
+        let long = "很".repeat(300);
+        push_search_history(&pool, &long, 1).await.unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT query FROM search_history ORDER BY id DESC LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.chars().count(),
+            crate::models::SEARCH_HISTORY_QUERY_MAX
+        );
+    }
+
+    #[tokio::test]
+    async fn search_history_ignores_blank_queries() {
+        let pool = history_pool().await;
+
+        push_search_history(&pool, "   ", 1).await.unwrap();
+
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM search_history")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 0);
     }
 }
