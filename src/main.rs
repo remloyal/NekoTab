@@ -42,6 +42,9 @@ mod auth;
 // 抓网页标题 / 描述给新增书签预填名称：解析与代取都只在服务端
 #[cfg(feature = "server")]
 mod page_meta;
+// 死链检测：并发探测书签地址还通不通（只在服务端发请求）
+#[cfg(feature = "server")]
+mod linkcheck;
 
 use routes::Route;
 

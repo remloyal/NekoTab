@@ -8,9 +8,15 @@
 use dioxus::prelude::*;
 
 use crate::models::{
-    AddOutcome, Bookmark, Engine, Group, HotItem, ImportReport, NewBookmark, NewEngine, NewGroup,
-    PageMeta, Quote, SearchHistory, Settings, TrashItem, Weather,
+    AddOutcome, Bookmark, Engine, Group, HotItem, ImportReport, LinkCheck, NewBookmark, NewEngine,
+    NewGroup, PageMeta, Quote, SearchHistory, Settings, TrashItem, VisitedItem, Weather,
 };
+// 访问流水的修剪靠一个进程内计数器
+#[cfg(feature = "server")]
+use std::sync::atomic::{AtomicU64, Ordering};
+// 时间窗的白名单只在服务端读参数时用得上（客户端只显示标签）
+#[cfg(feature = "server")]
+use crate::models::VisitsConfig;
 // 只在服务端的入库校验里用到（客户端的夹取在组件层）
 #[cfg(feature = "server")]
 use crate::models::clamp_span;
@@ -65,7 +71,7 @@ fn build_search_sql(keyword_count: usize, bookmarks_only: bool) -> String {
 
     let mut sql = String::from(
         "SELECT id, title, url, description, tags, group_id, group_ids, icon, created_at, \
-         span_w, span_h, kind, config, surface \
+         span_w, span_h, kind, config, surface, link_status, link_checked_at \
          FROM bookmarks WHERE deleted_at IS NULL",
     );
 
@@ -110,8 +116,8 @@ pub(crate) struct CleanBookmark {
 async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
     use crate::models::{
         is_widget_kind, text_icon_parts, CalendarConfig, ClockConfig, DialConfig, HotSearchConfig,
-        NoteConfig, TodoConfig, WeatherConfig, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT,
-        KIND_NOTE, KIND_TODO, KIND_WEATHER,
+        NoteConfig, TodoConfig, VisitsConfig, WeatherConfig, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL,
+        KIND_HOT, KIND_NOTE, KIND_TODO, KIND_VISITS, KIND_WEATHER,
     };
 
     let title = input.title.trim().to_string();
@@ -174,6 +180,14 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
                 let config = HotSearchConfig::parse(&input.config);
                 HotSearchConfig {
                     source: HotSearchConfig::clean_source(&config.source),
+                }
+                .to_json()
+            }
+            KIND_VISITS => {
+                // 只留时间窗这一个字段，别的（脏 JSON 里的多余键）一概丢掉
+                let config = VisitsConfig::parse(&input.config);
+                VisitsConfig {
+                    days: VisitsConfig::clean_days(config.days),
                 }
                 .to_json()
             }
@@ -1538,6 +1552,109 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     })
 }
 
+/// 死链检测专用的 HTTP 客户端。
+///
+/// 超时比通用客户端短（6 秒）：一次要探几十条，每条都慢 8 秒的话整轮要等
+/// 好几分钟。带一个常见的浏览器 UA——有些站点对陌生 UA 直接 403。
+#[cfg(feature = "server")]
+pub(crate) fn link_check_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(
+                crate::linkcheck::CHECK_TIMEOUT_SECS,
+            ))
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            )
+            .build()
+            .expect("创建 HTTP 客户端失败")
+    })
+}
+
+/// 检查书签的链接还通不通，并把结果写回书签行。
+///
+/// `ids` 为空表示检查全部书签（只查书签——组件没有网址）。结果分三种：
+/// 正常、坏链（状态码是错的）、不可达（连不上 / 超时）；只有坏链会被界面上
+/// 标出来并提供一键清理，不可达的那类多半是内网或要登录的站点。
+#[server]
+pub async fn check_links(ids: Vec<i64>) -> Result<Vec<LinkCheck>, ServerFnError> {
+    use crate::db;
+
+    // 取出要探的条目。书签数量是个人规模，直接全取出来在内存里筛，
+    // 省掉"SQLite 没有数组绑定"的那套逐条查询。
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, title, url FROM bookmarks WHERE deleted_at IS NULL AND kind = ''",
+    )
+    .fetch_all(db::pool())
+    .await
+    .map_err(|e| ServerFnError::new(format!("读取书签失败: {e}")))?;
+
+    let wanted: Vec<(i64, String, String)> = if ids.is_empty() {
+        rows
+    } else {
+        rows.into_iter()
+            .filter(|(id, _, _)| ids.contains(id))
+            .collect()
+    };
+
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let results = crate::linkcheck::probe_all(wanted).await;
+
+    // 把结果写回书签行，卡片上才能显示"这条可能坏了"
+    save_link_status(db::pool(), &results).await?;
+
+    Ok(results)
+}
+
+/// 把检测结果写回书签行。拆出来是为了能对着内存库单测。
+#[cfg(feature = "server")]
+async fn save_link_status(
+    pool: &sqlx::SqlitePool,
+    results: &[LinkCheck],
+) -> Result<(), ServerFnError> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
+
+    for item in results {
+        sqlx::query(
+            "UPDATE bookmarks SET link_status = ?, link_checked_at = datetime('now') WHERE id = ?",
+        )
+        .bind(&item.status)
+        .bind(item.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("写入链接状态失败: {e}")))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("提交链接状态失败: {e}")))?;
+
+    Ok(())
+}
+
+/// 清掉全部链接状态（检测结果会过期，站点可能又修好了）。
+#[server]
+pub async fn clear_link_status() -> Result<usize, ServerFnError> {
+    use crate::db;
+
+    sqlx::query(
+        "UPDATE bookmarks SET link_status = '', link_checked_at = '' WHERE link_status != ''",
+    )
+    .execute(db::pool())
+    .await
+    .map(|r| r.rows_affected() as usize)
+    .map_err(|e| ServerFnError::new(format!("清空链接状态失败: {e}")))
+}
+
 /// 抓取网页标题与描述，给新增书签预填名称。
 ///
 /// 由服务端代取：浏览器直连会被跨域挡，而且抓取逻辑（UA、8 秒超时、只读 head、
@@ -1842,6 +1959,136 @@ pub async fn clear_search_history() -> Result<(), ServerFnError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 访问统计
+// ---------------------------------------------------------------------------
+
+/// 访问流水最多保留多少条。
+///
+/// 记录是"一次点击一行"，一年下来也就几千条；但没有上限的话表会一直长，
+/// 而统计只用得到最近的这些。
+#[cfg(feature = "server")]
+const VISITS_KEEP: i64 = 5000;
+
+/// 记一次"从卡片打开了这条书签"。
+///
+/// 失败一律当作没发生：统计是锦上添花，绝不能因为写库出错就把用户的点击
+/// 弄出问题（页面已经跳走了，这里只是后台记一笔）。
+#[server]
+pub async fn record_visit(bookmark_id: i64) -> Result<(), ServerFnError> {
+    use crate::db;
+
+    insert_visit(db::pool(), bookmark_id)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+/// 写一条访问记录。书签不存在或已删时不写。
+///
+/// 拆出来是为了能对着内存库单测（`#[server]` 那一层拿不到注入的连接池）。
+#[cfg(feature = "server")]
+async fn insert_visit(pool: &sqlx::SqlitePool, bookmark_id: i64) -> Result<(), String> {
+    if bookmark_id <= 0 {
+        return Ok(());
+    }
+
+    // 只记活着的书签：删掉的（软删除）不该再进统计，还原回来也不该带上历史
+    let alive: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM bookmarks WHERE id = ? AND deleted_at IS NULL")
+            .bind(bookmark_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("记录访问失败: {e}"))?;
+
+    if alive.is_none() {
+        return Ok(());
+    }
+
+    sqlx::query("INSERT INTO bookmark_visits (bookmark_id) VALUES (?)")
+        .bind(bookmark_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("记录访问失败: {e}"))?;
+
+    prune_visits(pool).await;
+
+    Ok(())
+}
+
+/// 修剪访问流水：只留最近 [`VISITS_KEEP`] 条。
+///
+/// 不每次都剪——那是一次全表扫描，摊到每次点击上不划算。这里用进程内计数器，
+/// 每 50 次访问才真剪一次。
+#[cfg(feature = "server")]
+async fn prune_visits(pool: &sqlx::SqlitePool) {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    if COUNTER.fetch_add(1, Ordering::Relaxed) % 50 != 0 {
+        return;
+    }
+
+    let _ = sqlx::query(
+        "DELETE FROM bookmark_visits \
+         WHERE id NOT IN (SELECT id FROM bookmark_visits ORDER BY id DESC LIMIT ?)",
+    )
+    .bind(VISITS_KEEP)
+    .execute(pool)
+    .await;
+}
+
+/// 最常访问的书签。`days` 是统计窗口（0 = 全部），`limit` 是条数。
+#[server]
+pub async fn list_top_visited(days: i64, limit: i64) -> Result<Vec<VisitedItem>, ServerFnError> {
+    use crate::db;
+
+    top_visited(db::pool(), days, limit)
+        .await
+        .map_err(ServerFnError::new)
+}
+
+/// 聚合"最常访问"。拆出来是为了能对着内存库单测。
+#[cfg(feature = "server")]
+async fn top_visited(
+    pool: &sqlx::SqlitePool,
+    days: i64,
+    limit: i64,
+) -> Result<Vec<VisitedItem>, String> {
+    let days = VisitsConfig::clean_days(days);
+    let limit = limit.clamp(1, 20);
+
+    // 时间窗交给 SQLite 的 datetime 比较：表里存的是 'YYYY-MM-DD HH:MM:SS'（UTC），
+    // 与 datetime('now') 同一套口径，不必在 Rust 里拼时间字符串。
+    //
+    // 两条 SQL 各写一遍而不是拼字符串：sqlx 只认字面量（拼出来的语句要额外
+    // 审计注入风险），而这里唯一的差别就是一个 WHERE 条件。
+    let rows = if days > 0 {
+        sqlx::query_as::<_, VisitedItem>(
+            "SELECT b.id AS id, b.title AS title, b.url AS url, \
+             COUNT(v.id) AS count, MAX(v.visited_at) AS last_visited_at \
+             FROM bookmark_visits v JOIN bookmarks b ON b.id = v.bookmark_id \
+             WHERE b.deleted_at IS NULL AND v.visited_at >= datetime('now', ?) \
+             GROUP BY b.id ORDER BY count DESC, last_visited_at DESC LIMIT ?",
+        )
+        .bind(format!("-{days} days"))
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as::<_, VisitedItem>(
+            "SELECT b.id AS id, b.title AS title, b.url AS url, \
+             COUNT(v.id) AS count, MAX(v.visited_at) AS last_visited_at \
+             FROM bookmark_visits v JOIN bookmarks b ON b.id = v.bookmark_id \
+             WHERE b.deleted_at IS NULL \
+             GROUP BY b.id ORDER BY count DESC, last_visited_at DESC LIMIT ?",
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    };
+
+    rows.map_err(|e| format!("读取最常访问失败: {e}"))
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
@@ -1877,7 +2124,10 @@ mod tests {
                 kind        TEXT NOT NULL DEFAULT '',
                 config      TEXT NOT NULL DEFAULT '',
                 -- 与迁移 006 一致：卡片的面
-                surface     TEXT NOT NULL DEFAULT ''
+                surface     TEXT NOT NULL DEFAULT '',
+                -- 与迁移 010 一致：链接健康状态与检查时间
+                link_status     TEXT NOT NULL DEFAULT '',
+                link_checked_at TEXT NOT NULL DEFAULT ''
             )",
         )
         .execute(&pool)
@@ -2518,5 +2768,164 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(total, 0);
+    }
+
+    /// 访问统计用的内存库：书签表 + 访问流水表。
+    async fn visits_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        sqlx::query(
+            "CREATE TABLE bookmarks (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                title      TEXT NOT NULL,
+                url        TEXT NOT NULL,
+                deleted_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create bookmarks");
+
+        sqlx::query(
+            "CREATE TABLE bookmark_visits (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                bookmark_id INTEGER NOT NULL,
+                visited_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create bookmark_visits");
+
+        // 两条书签：1 是活着的，2 已经进了回收站
+        sqlx::query(
+            "INSERT INTO bookmarks (id, title, url) VALUES (1, 'Rust', 'https://rust-lang.org')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bookmark 1");
+        sqlx::query(
+            "INSERT INTO bookmarks (id, title, url, deleted_at) \
+             VALUES (2, '已删的', 'https://gone.example', datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert bookmark 2");
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn visits_count_and_order_by_frequency() {
+        let pool = visits_pool().await;
+
+        insert_visit(&pool, 1).await.unwrap();
+        insert_visit(&pool, 1).await.unwrap();
+        insert_visit(&pool, 1).await.unwrap();
+
+        let rows = top_visited(&pool, 0, 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Rust");
+        assert_eq!(rows[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn visits_skip_unknown_and_deleted_bookmarks() {
+        let pool = visits_pool().await;
+
+        insert_visit(&pool, 1).await.unwrap();
+        insert_visit(&pool, 2).await.unwrap(); // 已软删除
+        insert_visit(&pool, 999).await.unwrap(); // 根本不存在
+        insert_visit(&pool, 0).await.unwrap(); // 非法 id
+
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookmark_visits")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 1, "只有活着的书签才留下记录");
+
+        // 已删除的书签也不该出现在统计里
+        let rows = top_visited(&pool, 0, 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, 1);
+    }
+
+    #[tokio::test]
+    async fn visits_window_excludes_old_records() {
+        let pool = visits_pool().await;
+
+        insert_visit(&pool, 1).await.unwrap();
+        // 一条 40 天前的记录：超出 30 天窗口
+        sqlx::query(
+            "INSERT INTO bookmark_visits (bookmark_id, visited_at) \
+             VALUES (1, datetime('now', '-40 days'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let recent = top_visited(&pool, 30, 10).await.unwrap();
+        assert_eq!(recent[0].count, 1, "30 天窗口里只算今天那一次");
+
+        let all = top_visited(&pool, 0, 10).await.unwrap();
+        assert_eq!(all[0].count, 2, "不限时间时两条都算");
+    }
+
+    #[tokio::test]
+    async fn visits_respect_the_limit() {
+        let pool = visits_pool().await;
+
+        for _ in 0..5 {
+            insert_visit(&pool, 1).await.unwrap();
+        }
+
+        let rows = top_visited(&pool, 30, 1).await.unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn visits_days_falls_back_to_the_whitelist() {
+        // 不在白名单里的天数回落成默认的 30 天，而不是变成"什么都不过滤"
+        assert_eq!(VisitsConfig::clean_days(7), 7);
+        assert_eq!(VisitsConfig::clean_days(0), 0);
+        assert_eq!(VisitsConfig::clean_days(999), 30);
+        assert_eq!(VisitsConfig::clean_days(-3), 30);
+    }
+
+    #[tokio::test]
+    async fn link_status_is_written_back_to_the_bookmark_row() {
+        let pool = visits_pool().await;
+
+        // 内存库里那张书签表只有四个列，补上要写的那两列
+        sqlx::query("ALTER TABLE bookmarks ADD COLUMN link_status TEXT NOT NULL DEFAULT ''")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE bookmarks ADD COLUMN link_checked_at TEXT NOT NULL DEFAULT ''")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let results = vec![LinkCheck {
+            id: 1,
+            title: "Rust".to_string(),
+            url: "https://rust-lang.org".to_string(),
+            status: crate::models::LINK_BROKEN.to_string(),
+            detail: "HTTP 404".to_string(),
+        }];
+
+        save_link_status(&pool, &results).await.unwrap();
+
+        let (status, checked): (String, String) =
+            sqlx::query_as("SELECT link_status, link_checked_at FROM bookmarks WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "broken");
+        assert!(!checked.is_empty(), "检查时间要一起写上");
     }
 }

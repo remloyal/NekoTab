@@ -12,6 +12,7 @@ mod dial;
 mod hot_search;
 mod note;
 mod todo;
+mod visits;
 mod weather;
 
 pub use calendar::CalendarWidget;
@@ -20,6 +21,7 @@ pub use dial::DialWidget;
 pub use hot_search::HotSearchWidget;
 pub use note::NoteWidget;
 pub use todo::TodoWidget;
+pub use visits::VisitsWidget;
 pub use weather::WeatherWidget;
 
 /// 每秒跳一次的"当前时刻"快照。

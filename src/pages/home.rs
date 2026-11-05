@@ -4,12 +4,12 @@ use dioxus::prelude::*;
 
 use crate::backend::{
     delete_bookmark, delete_bookmarks, delete_engine, get_settings, list_bookmarks, list_engines,
-    list_groups, move_bookmarks, reorder_bookmarks, set_active_engine,
+    list_groups, move_bookmarks, reorder_bookmarks, restore_bookmarks, set_active_engine,
 };
 use crate::components::{
     build_tabs, group_value, parse_filter, AddCardDialog, AddTab, BatchMoveList, BookmarkForm,
     CardGrid, Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs, Modal,
-    Pager, QuoteLine, SearchBar, SearchMode, SettingsPanel, WidgetForm, GROUP_UNGROUPED,
+    Pager, QuoteLine, SearchBar, SearchMode, SettingsPanel, Toast, WidgetForm, GROUP_UNGROUPED,
     SEARCH_INPUT_ID,
 };
 use crate::models::{widget_label, Bookmark, Group, Settings};
@@ -36,6 +36,16 @@ enum ModalState {
         message: String,
     },
     BatchMove,
+}
+
+/// 底部提示条的内容。
+///
+/// 只放"刚做过、可以反悔"的事：删除后撤销是眼下唯一一处。`ids` 是被删掉的
+/// 那几条——还原就是把它们从回收站搬回来，位置、分组、图标都还在。
+#[derive(Clone, PartialEq)]
+struct ToastState {
+    message: String,
+    ids: Vec<i64>,
 }
 
 /// 把卡片分成「组件」与「书签」两组，各自保持原有顺序。
@@ -232,6 +242,9 @@ pub fn Home() -> Element {
     let mut drawer_open = use_signal(|| false);
     let mut menu = use_signal(|| Option::<(f64, f64, Option<Bookmark>)>::None);
     let mut modal = use_signal(|| ModalState::None);
+    // 底部提示条（删除后可撤销）与它的令牌：令牌用来让"自动消失"只关掉自己那一条
+    let mut toast = use_signal(|| Option::<ToastState>::None);
+    let mut toast_token = use_signal(|| 0u32);
 
     // ---- 快照：一律取克隆值，避免在 rsx 里和借用纠缠 ----
     let snapshot = match (&*bookmarks_res.read()).clone() {
@@ -585,15 +598,55 @@ pub fn Home() -> Element {
     let run_delete = move |ids: Vec<i64>| {
         spawn(async move {
             // 单条走 delete_bookmark，多条走批量版本；两者行为一致（都是软删除）
-            let ok = if ids.len() == 1 {
+            let count = ids.len();
+            let ok = if count == 1 {
                 delete_bookmark(ids[0]).await.is_ok()
             } else {
-                delete_bookmarks(ids).await.is_ok()
+                delete_bookmarks(ids.clone()).await.is_ok()
             };
             if ok {
                 selected.set(Vec::new());
                 refresh.set(refresh() + 1);
+
+                // 给一次反悔的机会。回收站还在，但要开设置、翻分区、找那条、
+                // 点还原——路径太长，误删的人多半懒得走完，于是就留在回收站里。
+                let token = toast_token() + 1;
+                toast_token.set(token);
+                toast.set(Some(ToastState {
+                    message: if count == 1 {
+                        "已删除 1 条书签".to_string()
+                    } else {
+                        format!("已删除 {count} 条书签")
+                    },
+                    ids,
+                }));
+
+                // 六秒后自己消失。令牌变了说明期间又删过别的，那条不该被这次
+                // 的定时器顺手动。
+                #[cfg(feature = "web")]
+                {
+                    gloo_timers::future::TimeoutFuture::new(6000).await;
+                    if toast_token() == token {
+                        toast.set(None);
+                    }
+                }
             }
+        });
+    };
+
+    // 撤销：把刚删掉的那几条从回收站搬回来。删除是软删除，位置、分组、图标
+    // 都还在原处，所以还原之后就是"刚才没删过"。
+    let undo_delete = move |_| {
+        let Some(state) = toast() else {
+            return;
+        };
+        let ids = state.ids.clone();
+
+        spawn(async move {
+            if restore_bookmarks(ids).await.is_ok() {
+                refresh.set(refresh() + 1);
+            }
+            toast.set(None);
         });
     };
 
@@ -961,6 +1014,22 @@ pub fn Home() -> Element {
                 }
             }
 
+            // ---- 底部提示条：删除后可以反悔 ----
+            if let Some(state) = toast() {
+                Toast {
+                    message: state.message.clone(),
+                    action_label: "撤销".to_string(),
+                    on_action: undo_delete,
+                    on_close: move |_| toast.set(None),
+                    // 底栏（编辑态 / 选择态）也占着底部，提示条抬高一点，别压在一起
+                    style: if is_editing || is_selecting {
+                        "bottom: 92px;"
+                    } else {
+                        "bottom: 28px;"
+                    },
+                }
+            }
+
             if let Some((x, y, target)) = menu() {
                 ContextMenu {
                     x,
@@ -1234,6 +1303,8 @@ mod tests {
             kind: crate::models::KIND_BOOKMARK.to_string(),
             config: String::new(),
             surface: String::new(),
+            link_status: String::new(),
+            link_checked_at: String::new(),
         }
     }
 

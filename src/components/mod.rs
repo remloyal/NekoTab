@@ -11,12 +11,14 @@ mod group_settings;
 mod group_tabs;
 mod icon_picker;
 pub mod icons;
+mod link_check_panel;
 mod modal;
 mod pager;
 mod quick_add_panel;
 mod quote;
 mod search_bar;
 mod settings_panel;
+mod toast;
 mod trash_panel;
 
 // 卡片相关的东西都在 `card` 里（框 / 网格 / 正文 / 表单 / 选卡弹窗）。
@@ -38,3 +40,4 @@ pub use pager::Pager;
 pub use quote::QuoteLine;
 pub use search_bar::{SearchBar, SearchMode, SEARCH_INPUT_ID};
 pub use settings_panel::SettingsPanel;
+pub use toast::Toast;

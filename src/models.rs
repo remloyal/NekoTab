@@ -43,6 +43,38 @@ pub struct Bookmark {
     /// 卡片的面（底色）。空串＝没设过，用该种类的默认；见 [`effective_surface`]。
     #[serde(default)]
     pub surface: String,
+    /// 链接健康状态。空串＝没查过；其余取值见 [`LINK_OK`] / [`LINK_BROKEN`] /
+    /// [`LINK_UNREACHABLE`]。组件没有网址，恒为空串。
+    #[serde(default)]
+    pub link_status: String,
+    /// 上次检查这条链接的时间（UTC 字符串）。空串＝没查过。
+    #[serde(default)]
+    pub link_checked_at: String,
+}
+
+/// 链接探测：正常响应。
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub const LINK_OK: &str = "ok";
+
+/// 链接探测：有响应但状态码是错误（404 / 500 …）。**这一类才算坏链。**
+pub const LINK_BROKEN: &str = "broken";
+
+/// 链接探测：连不上 / 超时 / DNS 失败。
+///
+/// 不等于坏链——内网地址、需要登录的站点、被墙的域名都会落到这一类，
+/// 所以界面上要与 [`LINK_BROKEN`] 分开显示，不提供"一键清理"。
+pub const LINK_UNREACHABLE: &str = "unreachable";
+
+/// 一次链接检测的结果。服务端探测好，客户端只管显示。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LinkCheck {
+    pub id: i64,
+    pub title: String,
+    pub url: String,
+    /// [`LINK_OK`] / [`LINK_BROKEN`] / [`LINK_UNREACHABLE`]
+    pub status: String,
+    /// 原因：状态码或错误摘要。正常时是空串。
+    pub detail: String,
 }
 
 /// 卡片种类：网址导航（书签）。空串是它的取值，于是"老数据 / 没传"天然落在书签上。
@@ -69,6 +101,9 @@ pub const KIND_TODO: &str = "todo";
 /// 热搜组件。
 pub const KIND_HOT: &str = "hot";
 
+/// 「最常访问」组件。
+pub const KIND_VISITS: &str = "visits";
+
 /// 组件类型白名单：`(kind, 显示名, 内置图标 id)`。
 ///
 /// 做成白名单而不是"任意字符串"：`kind` 决定了用哪个组件渲染、参数按哪套规则规范化，
@@ -76,7 +111,7 @@ pub const KIND_HOT: &str = "hot";
 ///
 /// 图标取 [`crate::components::icons::GROUP_ICONS`] 的 id，供「添加卡片」弹窗的选卡
 /// 面板用——那一格要是没有图标，就得在渲染处按 kind 再写一次分支。
-pub const WIDGET_KINDS: [(&str, &str, &str); 7] = [
+pub const WIDGET_KINDS: [(&str, &str, &str); 8] = [
     (KIND_CLOCK, "数字时钟", "digital"),
     (KIND_DIAL, "表盘时钟", "clock"),
     (KIND_CALENDAR, "日历", "calendar"),
@@ -84,6 +119,7 @@ pub const WIDGET_KINDS: [(&str, &str, &str); 7] = [
     (KIND_NOTE, "记事本", "note"),
     (KIND_WEATHER, "天气", "cloud"),
     (KIND_HOT, "热搜", "search"),
+    (KIND_VISITS, "最常访问", "star"),
 ];
 
 /// 这个 kind 是不是（已知的）组件。
@@ -460,6 +496,76 @@ impl HotSearchConfig {
 pub struct HotItem {
     pub title: String,
     pub url: String,
+}
+
+/// 「最常访问」组件的参数。
+///
+/// 只一个字段：统计最近多少天。`0` 表示不限时间（全部历史）。
+/// 天数是有限的几档（7 / 30 / 90 / 0），不做自由输入——自由输入会让
+/// "最近 0.5 天"这种值落库，之后每次读都得再夹一次。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VisitsConfig {
+    #[serde(default = "default_visits_days")]
+    pub days: i64,
+}
+
+/// 「最常访问」默认统计最近 30 天：够看出习惯，又不会被去年的记录盖住。
+pub fn default_visits_days() -> i64 {
+    30
+}
+
+/// 统计时间窗的可选值（天）。`0` = 全部。
+pub const VISITS_DAY_CHOICES: [i64; 4] = [7, 30, 90, 0];
+
+impl Default for VisitsConfig {
+    fn default() -> Self {
+        Self {
+            days: default_visits_days(),
+        }
+    }
+}
+
+impl VisitsConfig {
+    pub fn parse(raw: &str) -> Self {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+
+    /// 把时间窗收敛到白名单；认不出的回落默认。
+    #[cfg_attr(not(feature = "server"), allow(dead_code))]
+    pub fn clean_days(value: i64) -> i64 {
+        if VISITS_DAY_CHOICES.contains(&value) {
+            value
+        } else {
+            default_visits_days()
+        }
+    }
+
+    /// 时间窗的中文说明（界面上直接显示）。
+    pub fn days_label(&self) -> &'static str {
+        match self.days {
+            7 => "最近 7 天",
+            30 => "最近 30 天",
+            90 => "最近 90 天",
+            _ => "全部",
+        }
+    }
+}
+
+/// 一条「最常访问」记录。服务端把书签与访问流水 join 好，客户端只管画。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "server", derive(sqlx::FromRow))]
+pub struct VisitedItem {
+    pub id: i64,
+    pub title: String,
+    pub url: String,
+    /// 该时间窗内被打开的次数
+    pub count: i64,
+    /// 最后一次打开的时间（UTC 字符串）
+    pub last_visited_at: String,
 }
 
 /// 一次天气查询的结果。服务端填好，客户端只负责画。
@@ -1761,6 +1867,8 @@ mod tests {
             kind: KIND_BOOKMARK.to_string(),
             config: String::new(),
             surface: String::new(),
+            link_status: String::new(),
+            link_checked_at: String::new(),
         };
 
         assert_eq!(card.surface_class(), "none", "书签卡不设面时是透明的");

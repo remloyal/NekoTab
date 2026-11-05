@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use super::background_panel::BackgroundPanel;
 use super::group_settings::GroupSettings;
+use super::link_check_panel::LinkCheckPanel;
 use super::quick_add_panel::QuickAddPanel;
 use super::trash_panel::TrashPanel;
 use crate::backend::{clear_icon_cache, error_text, import_bookmarks, save_settings};
@@ -47,11 +48,12 @@ enum Section {
     Data,
     QuickAdd,
     Groups,
+    Links,
     Trash,
 }
 
 /// `(分区, 菜单文字)`。顺序即左侧菜单的显示顺序。
-const SECTIONS: [(Section, &str); 10] = [
+const SECTIONS: [(Section, &str); 11] = [
     (Section::Site, "站点信息"),
     (Section::Appearance, "外观"),
     (Section::Background, "背景"),
@@ -61,6 +63,7 @@ const SECTIONS: [(Section, &str); 10] = [
     (Section::Data, "数据"),
     (Section::QuickAdd, "快捷添加"),
     (Section::Groups, "分组管理"),
+    (Section::Links, "链接检查"),
     (Section::Trash, "回收站"),
 ];
 
@@ -831,6 +834,11 @@ pub fn SettingsPanel(
                     // ---------- 分组管理 ----------
                     Section::Groups => rsx! {
                         GroupSettings { groups, on_changed: move |_| on_groups_changed.call(()) }
+                    },
+
+                    // ---------- 链接检查 ----------
+                    Section::Links => rsx! {
+                        LinkCheckPanel { on_changed: move |_| on_bookmarks_changed.call(()) }
                     },
 
                     // ---------- 回收站 ----------

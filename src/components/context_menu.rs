@@ -55,7 +55,16 @@ pub fn ContextMenu(
                             href: "{card.url}",
                             target: "_blank",
                             rel: "noopener noreferrer",
-                            onclick: move |_| on_close.call(()),
+                            onclick: {
+                                // 从菜单打开也算一次访问，统计口径与点卡片一致
+                                let id = card.id;
+                                move |_| {
+                                    on_close.call(());
+                                    spawn(async move {
+                                        let _ = crate::backend::record_visit(id).await;
+                                    });
+                                }
+                            },
                             "在新标签页打开"
                         }
                     }

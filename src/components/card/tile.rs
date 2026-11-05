@@ -1,13 +1,14 @@
 use dioxus::prelude::*;
 
 use super::widgets::{
-    CalendarWidget, ClockWidget, DialWidget, HotSearchWidget, NoteWidget, TodoWidget, WeatherWidget,
+    CalendarWidget, ClockWidget, DialWidget, HotSearchWidget, NoteWidget, TodoWidget, VisitsWidget,
+    WeatherWidget,
 };
 use crate::components::icons;
 use crate::models::{
     Bookmark, CalendarConfig, ClockConfig, DialConfig, HotSearchConfig, NoteConfig, TodoConfig,
-    WeatherConfig, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT, KIND_NOTE, KIND_TODO,
-    KIND_WEATHER,
+    VisitsConfig, WeatherConfig, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT, KIND_NOTE,
+    KIND_TODO, KIND_VISITS, KIND_WEATHER, LINK_BROKEN,
 };
 
 /// 书签自定义图标的渲染。空串返回 `None`（表示走站点自动代取那条路）。
@@ -164,6 +165,13 @@ pub fn CardTile(
                 config: WeatherConfig::parse(&bookmark.config),
             }
         },
+        KIND_VISITS => rsx! {
+            VisitsWidget {
+                // 统计窗口变了同样要重挂：`use_future` 只认挂载时捕获的那份参数
+                key: "{bookmark.config}",
+                config: VisitsConfig::parse(&bookmark.config),
+            }
+        },
         // 未知 kind 理论上进不来（服务端有白名单）。真出现了就不画正文，
         // 但保留卡片本身——至少还能右键把它删掉，而不是凭空少一块。
         _ => rsx! {},
@@ -296,9 +304,25 @@ pub fn CardTile(
                         evt.prevent_default();
                         evt.stop_propagation();
                         on_edit.call(target.clone());
+                        return;
                     }
+
+                    // 普通态点书签：记一次访问（「最常访问」组件的原料）。
+                    // 不 await 也不关心结果——页面正在跳走，统计写不写得进去都无所谓。
+                    // 同标签页跳转时这个请求可能被浏览器掐掉，那一次就不算数。
+                    let id = target.id;
+                    spawn(async move {
+                        let _ = crate::backend::record_visit(id).await;
+                    });
                 }
             },
+
+            // 坏链标记：上一次链接检查判定这条点不开了（404 / 500 之类）。
+            // 只标"坏链"，不标"连不上"——后者多半是内网或要登录的站点，
+            // 标出来只会平白让人担心（见 src/linkcheck.rs）。
+            if !is_widget && bookmark.link_status == LINK_BROKEN {
+                span { class: "tile-warn", title: "上次检查时这条链接打不开", "!" }
+            }
 
             if selecting && !is_widget {
                 span {

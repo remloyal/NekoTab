@@ -3,10 +3,10 @@ use dioxus::prelude::*;
 use crate::backend::{add_bookmark, error_text, update_bookmark};
 use crate::models::{
     clamp_span, widget_label, AddOutcome, Bookmark, CalendarConfig, ClockConfig, DialConfig,
-    HotSearchConfig, NewBookmark, NoteConfig, TodoConfig, TodoItem, WeatherConfig, CARD_SURFACES,
-    HOT_SOURCES, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT, KIND_NOTE, KIND_TODO,
-    KIND_WEATHER, NOTE_MAX_CHARS, SPAN_MAX, SPAN_PRESETS, TODO_MAX_ITEMS, TODO_TEXT_MAX_CHARS,
-    WEATHER_MAX_LOCATION_CHARS,
+    HotSearchConfig, NewBookmark, NoteConfig, TodoConfig, TodoItem, VisitsConfig, WeatherConfig,
+    CARD_SURFACES, HOT_SOURCES, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT, KIND_NOTE,
+    KIND_TODO, KIND_VISITS, KIND_WEATHER, NOTE_MAX_CHARS, SPAN_MAX, SPAN_PRESETS, TODO_MAX_ITEMS,
+    TODO_TEXT_MAX_CHARS, VISITS_DAY_CHOICES, WEATHER_MAX_LOCATION_CHARS,
 };
 
 /// 组件卡片的表单，作为弹窗内容使用。
@@ -51,6 +51,7 @@ pub fn WidgetForm(
     let calendar = CalendarConfig::parse(raw_config);
     let todo = TodoConfig::parse(raw_config);
     let hot = HotSearchConfig::parse(raw_config);
+    let visits = VisitsConfig::parse(raw_config);
 
     let mut title = use_signal(|| {
         existing
@@ -74,6 +75,7 @@ pub fn WidgetForm(
     let mut cal_lunar = use_signal(|| calendar.show_lunar);
     let mut cal_monday = use_signal(|| calendar.week_start_monday);
     let mut hot_source = use_signal(|| hot.source.clone());
+    let mut visits_days = use_signal(|| visits.days);
     // 待办用"一行一条"的文本编辑：`[x] ` 前缀表示已完成。比逐个条目的输入框
     // 更容易批量粘贴，也和记事本的多行文本是一套肌肉记忆。
     let mut todo_lines = use_signal(|| {
@@ -161,6 +163,10 @@ pub fn WidgetForm(
                 .to_json(),
                 KIND_HOT => HotSearchConfig {
                     source: hot_source(),
+                }
+                .to_json(),
+                KIND_VISITS => VisitsConfig {
+                    days: visits_days(),
                 }
                 .to_json(),
                 _ => String::new(),
@@ -375,6 +381,26 @@ pub fn WidgetForm(
                     }
                     p { class: "field-hint",
                         "由服务端代取并缓存十分钟，卡片每十分钟刷新一次；取不到时会直接写明原因。"
+                    }
+                }
+            }
+
+            if kind == KIND_VISITS {
+                div { class: "field",
+                    span { class: "field-label", "统计范围" }
+                    div { class: "segmented wrap",
+                        for days in VISITS_DAY_CHOICES {
+                            button {
+                                key: "{days}",
+                                class: if visits_days() == days { "segment active" } else { "segment" },
+                                r#type: "button",
+                                onclick: move |_| visits_days.set(days),
+                                if days == 0 { "全部" } else { "{days} 天" }
+                            }
+                        }
+                    }
+                    p { class: "field-hint",
+                        "统计你自己从卡片打开书签的次数（数据存在服务端，换设备也带着）。"
                     }
                 }
             }

@@ -880,6 +880,27 @@ body {
     border-color: var(--accent);
 }
 
+/* 坏链标记：卡片右上角的一枚小圆点。位置避开删除角标（右上）与选择圈（左上），
+   所以放在右下角。 */
+.tile-warn {
+    position: absolute;
+    right: 8px;
+    bottom: 2px;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 17px;
+    height: 17px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    color: #fff;
+    background: var(--danger);
+    border-radius: 50%;
+    box-shadow: 0 2px 8px var(--shadow-soft);
+    cursor: help;
+}
+
 /* ---------- 编辑态 / 选择态底栏 ---------- */
 .edit-bar {
     position: fixed;
@@ -913,6 +934,77 @@ body {
     padding: 7px 16px;
     font-size: 13.5px;
     white-space: nowrap;
+}
+
+/* ---------- 底部提示条（删除后可撤销） ---------- */
+.toast {
+    position: fixed;
+    left: 50%;
+    /* 底栏出现时由内联 style 抬到 92px */
+    bottom: 28px;
+    transform: translateX(-50%);
+    z-index: 46;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(92vw, 420px);
+    padding: 9px 10px 9px 16px;
+    font-size: 13.5px;
+    color: var(--text);
+    background: var(--panel-solid-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+    animation: toast-in 0.18s ease-out;
+}
+
+.toast-msg {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.toast-action {
+    flex: none;
+    padding: 3px 9px;
+    font: inherit;
+    font-weight: 600;
+    color: var(--accent);
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.toast-action:hover {
+    background: var(--hover-soft);
+}
+
+.toast-close {
+    flex: none;
+    padding: 2px 5px;
+    font: inherit;
+    color: var(--text-dim);
+    background: transparent;
+    border: none;
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+.toast-close:hover {
+    color: var(--text);
+    background: var(--hover-soft);
+}
+
+@keyframes toast-in {
+    from {
+        opacity: 0;
+        transform: translate(-50%, 10px);
+    }
+    to {
+        opacity: 1;
+        transform: translate(-50%, 0);
+    }
 }
 
 /* ---------- 卡片内容 ---------- */
@@ -2834,7 +2926,8 @@ select.input {
 
 /* ---------- 待办组件 ---------- */
 .todo-head,
-.hot-head {
+.hot-head,
+.visits-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -2844,18 +2937,21 @@ select.input {
 }
 
 .todo-title,
-.hot-title {
+.hot-title,
+.visits-title {
     font-weight: 650;
 }
 
 .todo-progress,
-.hot-source {
+.hot-source,
+.visits-range {
     color: var(--text-dim);
     font-size: 0.82em;
 }
 
 .todo-list,
-.hot-list {
+.hot-list,
+.visits-list {
     display: flex;
     flex: 1;
     min-height: 0;
@@ -2901,6 +2997,53 @@ select.input {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+/* ---------- 最常访问组件 ---------- */
+.visits-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 0;
+    font-size: min(calc(100cqw * 0.066), calc(100cqh * 0.058));
+    line-height: 1.35;
+    cursor: pointer;
+}
+
+.visits-item:hover .visits-text {
+    color: var(--accent);
+}
+
+.visits-rank {
+    flex: none;
+    width: 1.2em;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.visits-item:nth-child(-n + 3) .visits-rank {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.visits-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 次数：靠右的一枚小数字，说明"为什么它排在这里" */
+.visits-count {
+    flex: none;
+    margin-left: auto;
+    padding: 0 5px;
+    font-size: 0.78em;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    background: var(--hover-soft);
+    border-radius: 999px;
 }
 
 .todo-more {
@@ -2949,7 +3092,8 @@ select.input {
     .widget-calendar .cal-grid,
     .widget-todo .todo-list,
     .widget-todo .todo-more,
-    .widget-hot .hot-list {
+    .widget-hot .hot-list,
+    .widget-visits .visits-list {
         display: none;
     }
 }
