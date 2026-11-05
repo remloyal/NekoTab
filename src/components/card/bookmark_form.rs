@@ -1,10 +1,32 @@
 use dioxus::prelude::*;
 
-use crate::backend::{add_bookmark, error_text, update_bookmark};
+use crate::backend::{add_bookmark, error_text, fetch_page_meta, update_bookmark};
 use crate::components::icon_picker::IconPicker;
 use crate::models::{
     clamp_span, AddOutcome, Bookmark, Group, NewBookmark, CARD_SURFACES, SPAN_MAX, SPAN_PRESETS,
 };
+
+/// 抓一次页面信息并回填表单。
+///
+/// 只填空位：用户已经打好的名称 / 描述不会被代取结果顶掉。`overwrite_title`
+/// 只有手动点「重新抓取」时才为真——那是明确的"以页面为准"的意图。
+async fn fill_meta(
+    link: String,
+    mut title: Signal<String>,
+    mut description: Signal<String>,
+    overwrite_title: bool,
+) -> Result<(), String> {
+    let meta = fetch_page_meta(link).await.map_err(|e| error_text(&e))?;
+
+    if !meta.title.is_empty() && (overwrite_title || title().trim().is_empty()) {
+        title.set(meta.title);
+    }
+    if !meta.description.is_empty() && description().trim().is_empty() {
+        description.set(meta.description);
+    }
+
+    Ok(())
+}
 
 /// 书签表单，作为弹窗内容使用。
 ///
@@ -77,33 +99,105 @@ pub fn BookmarkForm(
     let mut span_h = use_signal(|| clamp_span(existing.as_ref().map(|b| b.span_h).unwrap_or(1)));
     let mut busy = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
+    // 抓标题：进行中标记、给用户的一句提示、以及已经抓过的地址（失焦时别重复请求）
+    let mut meta_busy = use_signal(|| false);
+    let mut meta_note = use_signal(|| Option::<String>::None);
+    let mut fetched_url = use_signal(|| Option::<String>::None);
+
+    // 失焦时自动抓（名称空着才抓），「抓取标题」按钮是手动重抓。
+    let mut run_fetch = move |manual: bool| {
+        if meta_busy() {
+            return;
+        }
+
+        let link = url().trim().to_string();
+        if !(link.starts_with("http://") || link.starts_with("https://")) {
+            if manual {
+                meta_note.set(Some("网址需以 http:// 或 https:// 开头".to_string()));
+            }
+            return;
+        }
+        if !manual && !title().trim().is_empty() {
+            return;
+        }
+        if !manual && fetched_url().as_deref() == Some(link.as_str()) {
+            return;
+        }
+
+        // 在进行中的标记要在 spawn 之前置位：失焦与按钮点击可能背靠背发生，
+        // 晚一步的话两次请求会同时飞出去。
+        meta_busy.set(true);
+        meta_note.set(None);
+
+        spawn(async move {
+            match fill_meta(link.clone(), title, description, manual).await {
+                Ok(()) => {
+                    fetched_url.set(Some(link));
+                    if title().trim().is_empty() {
+                        meta_note.set(Some("这个页面没给出标题，手动填一下吧".to_string()));
+                    }
+                }
+                // 抓不到就只是少一条辅助信息，不打断填写与保存。同样记下地址，
+                // 免得之后每次失焦都再等一次超时；想重试可以点「重新抓取」。
+                Err(message) => {
+                    fetched_url.set(Some(link));
+                    meta_note.set(Some(format!("没抓到标题：{message}")));
+                }
+            }
+
+            meta_busy.set(false);
+        });
+    };
 
     let submit = move |_| {
         if busy() {
             return;
         }
 
-        let input = NewBookmark {
-            title: title(),
-            url: url(),
-            description: description(),
-            tags: existing_tags.clone(),
-            // 主分组取第一个；完整归属由 group_ids 承载
-            group_id: group_ids().first().copied(),
-            group_ids: group_ids(),
-            icon: icon(),
-            span_w: span_w(),
-            span_h: span_h(),
-            // 这个表单只管网址导航；组件走 WidgetForm
-            kind: crate::models::KIND_BOOKMARK.to_string(),
-            // 书签没有组件参数。update 的 SQL 里不写 kind，所以种类改不掉
-            config: String::new(),
-            surface: surface(),
-        };
+        // 每次提交克隆一份：`spawn` 里的 async move 块按值捕获它，直接引用外层
+        // 变量会让这个闭包变成 FnOnce，而事件处理器要的是 FnMut。
+        let tags = existing_tags.clone();
 
         spawn(async move {
             busy.set(true);
             error.set(None);
+            meta_note.set(None);
+
+            // 新增时名称还空着（比如在网址框里直接回车提交）：先替用户抓一次。
+            // 抓到就随这次保存一起写进去；抓不到再交给下面的校验去提示。
+            if !is_edit && title().trim().is_empty() {
+                let link = url().trim().to_string();
+                if link.starts_with("http://") || link.starts_with("https://") {
+                    let _ = fill_meta(link, title, description, false).await;
+                }
+            }
+
+            let input = NewBookmark {
+                title: title(),
+                url: url(),
+                description: description(),
+                tags,
+                // 主分组取第一个；完整归属由 group_ids 承载
+                group_id: group_ids().first().copied(),
+                group_ids: group_ids(),
+                icon: icon(),
+                span_w: span_w(),
+                span_h: span_h(),
+                // 这个表单只管网址导航；组件走 WidgetForm
+                kind: crate::models::KIND_BOOKMARK.to_string(),
+                // 书签没有组件参数。update 的 SQL 里不写 kind，所以种类改不掉
+                config: String::new(),
+                surface: surface(),
+            };
+
+            // 新增时名称空着：抓取也没能补上，给一句比"标题不能为空"更具体的提示
+            if !is_edit && input.title.trim().is_empty() {
+                error.set(Some(
+                    "没抓到标题，请手动填写名称（这个页面可能不让访问）".to_string(),
+                ));
+                busy.set(false);
+                return;
+            }
 
             // 编辑走 update（无返回值），新增要知道是否真的写进去了，
             // 统一成 AddOutcome 再分支
@@ -147,14 +241,33 @@ pub fn BookmarkForm(
                 submit(());
             },
 
-            label { class: "field",
-                span { class: "field-label", "名称" }
+            div { class: "field",
+                div { class: "field-label-row",
+                    span { class: "field-label", "名称" }
+                    button {
+                        class: "btn-ghost btn-mini",
+                        r#type: "button",
+                        disabled: meta_busy(),
+                        title: "按上面的网址抓取页面标题",
+                        onclick: move |_| run_fetch(true),
+                        if meta_busy() {
+                            "抓取中…"
+                        } else if title().trim().is_empty() {
+                            "抓取标题"
+                        } else {
+                            "重新抓取"
+                        }
+                    }
+                }
                 input {
                     class: "input",
                     autofocus: true,
                     placeholder: "例如：GitHub",
                     value: "{title}",
                     oninput: move |e| title.set(e.value()),
+                }
+                if let Some(note) = meta_note() {
+                    p { class: "field-hint", "{note}" }
                 }
             }
 
@@ -165,7 +278,10 @@ pub fn BookmarkForm(
                     placeholder: "https://example.com",
                     value: "{url}",
                     oninput: move |e| url.set(e.value()),
+                    // 填完网址离开输入框时就替用户抓一次；名称已经写了则不打扰
+                    onblur: move |_| run_fetch(false),
                 }
+                p { class: "field-hint", "离开输入框时会自动抓一次页面标题，抓不到也可以手填。" }
             }
 
             label { class: "field",

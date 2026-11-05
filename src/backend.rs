@@ -9,7 +9,7 @@ use dioxus::prelude::*;
 
 use crate::models::{
     AddOutcome, Bookmark, Engine, Group, HotItem, ImportReport, NewBookmark, NewEngine, NewGroup,
-    Quote, SearchHistory, Settings, TrashItem, Weather,
+    PageMeta, Quote, SearchHistory, Settings, TrashItem, Weather,
 };
 // 只在服务端的入库校验里用到（客户端的夹取在组件层）
 #[cfg(feature = "server")]
@@ -1536,6 +1536,33 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
             .build()
             .expect("创建 HTTP 客户端失败")
     })
+}
+
+/// 抓取网页标题与描述，给新增书签预填名称。
+///
+/// 由服务端代取：浏览器直连会被跨域挡，而且抓取逻辑（UA、8 秒超时、只读 head、
+/// 256 KB 上限）已经在站点图标那里有一套，直接复用。
+///
+/// 只接受 http(s)，且先过一遍 [`crate::favicon::host_of`]——与图标、入库校验同一条
+/// 口径。单用户自部署下它和「添加书签」是同一层权限（设了 `ACCESS_PASSWORD` 就
+/// 一起要登录），所以没有额外把内网地址挡掉：给内网服务收藏书签是正常用法，
+/// 代价是服务端会去请求用户给的地址（与站点图标接口相同的取舍）。
+#[server]
+pub async fn fetch_page_meta(url: String) -> Result<PageMeta, ServerFnError> {
+    let url = url.trim().to_string();
+
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(ServerFnError::new("网址需以 http:// 或 https:// 开头"));
+    }
+    if crate::favicon::host_of(&url).is_none() {
+        return Err(ServerFnError::new("网址格式不对"));
+    }
+
+    let html = crate::favicon::server::fetch_html_head(&url)
+        .await
+        .map_err(ServerFnError::new)?;
+
+    Ok(crate::page_meta::parse_page_meta(&html))
 }
 
 /// 拉一条一言。由服务端代取，浏览器不直接访问第三方：既避开跨域，

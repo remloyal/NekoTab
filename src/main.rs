@@ -39,6 +39,9 @@ mod hot;
 // 可选的整站访问密码：登录页 + Cookie 会话 + 守卫中间件
 #[cfg(feature = "server")]
 mod auth;
+// 抓网页标题 / 描述给新增书签预填名称：解析与代取都只在服务端
+#[cfg(feature = "server")]
+mod page_meta;
 
 use routes::Route;
 

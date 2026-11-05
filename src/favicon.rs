@@ -125,8 +125,10 @@ fn extension_for(content_type: &str) -> &'static str {
     }
 }
 
+// `pub(crate)`：抓标题（`page_meta`）复用同一个 head 抓取，不必为"只读 head"
+// 再写一份超时、体积上限与 UA。
 #[cfg(feature = "server")]
-mod server {
+pub(crate) mod server {
     use std::path::PathBuf;
     use std::sync::OnceLock;
 
@@ -522,7 +524,10 @@ mod server {
     }
 
     /// 只读到 `</head>` 或上限为止，避免为了一个图标下载整个页面。
-    async fn fetch_html_head(url: &str) -> Result<String, String> {
+    ///
+    /// 抓标题（[`crate::page_meta`]）也复用它：同样的 UA、8 秒超时、256 KB 上限，
+    /// 以及"不是 HTML 就不是页面"的校验。
+    pub(crate) async fn fetch_html_head(url: &str) -> Result<String, String> {
         let mut response = backend::http_client()
             .get(url)
             .header(reqwest::header::USER_AGENT, USER_AGENT)

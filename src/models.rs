@@ -678,6 +678,16 @@ pub struct Quote {
     pub source: String,
 }
 
+/// 从网页 head 里抓到的信息，用来给新增书签预填名称与描述。
+///
+/// 取不到的那一项是空串，由表单决定保持空白还是给一句提示——抓标题只是
+/// 锦上添花，失败不该挡住保存。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PageMeta {
+    pub title: String,
+    pub description: String,
+}
+
 /// 内置壁纸预设。与 `main.css` 里的 `.bg.preset-*` 一一对应。
 pub const BACKGROUND_PRESETS: [&str; 6] = ["aurora", "nebula", "forest", "ocean", "sunset", "mono"];
 

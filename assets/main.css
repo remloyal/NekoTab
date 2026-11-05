@@ -1690,6 +1690,15 @@ select.input {
     background: var(--hover-soft);
 }
 
+/* 名称字段右侧的「抓取标题」：比常规 ghost 按钮矮一档，不跟主操作抢视觉。
+   放在 .btn-ghost 之后，靠顺序覆盖它的 padding / 字号（两者特指度相同）。 */
+.btn-mini {
+    padding: 3px 9px;
+    font-size: 12px;
+    line-height: 1.5;
+    border-radius: 7px;
+}
+
 .btn-ghost:disabled {
     opacity: 0.45;
     cursor: default;
