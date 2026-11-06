@@ -1048,14 +1048,16 @@ body {
     object-fit: contain;
     background: #fff;
     border-radius: inherit;
+    /* 图标没真正加载出来之前（还在飞、或已经失败）先整块藏起来，
+       让底下的首字色块顶上来；浏览器那个"碎图"占位符也就没机会露脸。
+       加载成功之后才由 data-ok 放开（见 components/card/tile.rs）。 */
+    opacity: 0;
+    transition: opacity 0.15s ease;
 }
 
-/* 取不到站点图标：整块撤掉，把下面的首字色块让出来。
-   这个标记有两条来路——onerror（hydration 之后才失败的），以及 hydration 后
-   补查一次 naturalWidth（在 onerror 挂上之前就失败的，见
-   dom::mark_broken_favicons）。缺了后者，那些卡片会一直顶着浏览器的"碎图"占位符。 */
-.tile-favicon[data-broken] {
-    display: none;
+/* 图标确实加载出来了，才把它显示出来盖住首字 */
+.tile-favicon[data-ok="1"] {
+    opacity: 1;
 }
 
 /* 自定义内置图标：铺满图标块，颜色跟随 .tile-icon 的白色 */

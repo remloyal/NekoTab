@@ -49,13 +49,13 @@ pub fn CardGrid(
 
     let is_draggable = editing && !selecting;
 
-    // hydration 后补查一次图标加载状态：SSR 那批 HTML 里的 <img> 可能在 onerror
-    // 挂上之前就已经失败了（同源 404 往往比 wasm 下载还快），不补这一刀就会一直
-    // 顶着浏览器的"碎图"占位符。之后新增的图片都是客户端渲染、监听创建时已就位，
-    // 各自的 onerror 管得住，所以这里跑一次就够。
+    // hydration 后补查一次图标加载状态：SSR 那批 HTML 里的 <img> 可能在 onload
+    // 挂上之前就已经加载完了（同源 /icon/xx 往往比 wasm 下载还快），不补这一刀，
+    // 那些卡片就一直停在首字色块上。之后新增的图片都是客户端渲染、监听创建时已就位，
+    // 各自的 onload 管得住，所以这里跑一次就够。
     use_effect(move || {
         spawn(async move {
-            crate::dom::mark_broken_favicons().await;
+            crate::dom::mark_loaded_favicons().await;
         });
     });
 

@@ -12,6 +12,9 @@ use crate::models::{
 };
 
 /// 书签自定义图标的渲染。空串返回 `None`（表示走站点自动代取那条路）。
+///
+/// 只管内置图标与文字图标这两种"画出来"的；直接给图片地址的那种不走这里——
+/// 那是要等加载结果的，得由调用方拿着 `onload` 才画得出来。
 fn custom_icon(icon: &str) -> Option<Element> {
     if let Some(id) = icons::builtin_id(icon) {
         return icons::builtin_svg(id).map(|svg| rsx! { div { class: "tile-custom", {svg} } });
@@ -25,12 +28,16 @@ fn custom_icon(icon: &str) -> Option<Element> {
             }
         });
     }
-    if icon.starts_with("http://") || icon.starts_with("https://") || icon.starts_with('/') {
-        return Some(rsx! {
-            img { class: "tile-favicon", src: "{icon}", alt: "", loading: "lazy" }
-        });
-    }
     None
+}
+
+/// 自定义图标里直接给了一个图片地址（而不是内置图标名或文字）。
+fn custom_icon_url(icon: &str) -> Option<String> {
+    if icon.starts_with("http://") || icon.starts_with("https://") || icon.starts_with('/') {
+        Some(icon.to_string())
+    } else {
+        None
+    }
 }
 
 fn icon_of(bookmark: &Bookmark) -> (String, u32) {
@@ -111,12 +118,18 @@ pub fn CardTile(
     };
     let id = bookmark.id;
 
-    // 取不到站点图标时回退到首字块
-    let mut icon_failed = use_signal(|| false);
+    // 站点图标有没有真正加载出来。
+    //
+    // 没加载出来（还在飞、或已经失败）就先不显示它，让底下的首字色块顶着；
+    // 加载成功才把图标放出来。CSS 那边靠 data-ok 开关（见 assets/main.css）。
+    // 这样浏览器那个"碎图"占位符就没有机会露脸了。
+    let mut icon_loaded = use_signal(|| false);
     // 站点图标由本服务的 /icon/{host} 代取；host 解析不出来就不请求
     let icon_host = crate::favicon::host_of(&bookmark.url);
     // 自定义图标优先：内置图标画 svg，地址直接当图片用；空串表示按站点自动代取
     let custom = custom_icon(&bookmark.icon);
+    // 自定义图标直接给地址的（要等加载结果，所以单独一路）
+    let custom_url = custom_icon_url(&bookmark.icon);
 
     // 长按检测：按下时的坐标 + 递增令牌（令牌变了就说明这次按下已作废）
     let mut press_origin = use_signal(|| Option::<(f64, f64)>::None);
@@ -359,18 +372,29 @@ pub fn CardTile(
                     span { class: "tile-letter", "{initial}" }
                     if let Some(icon) = custom {
                         {icon}
+                    } else if let Some(src) = custom_url.clone() {
+                        // 自定义图标直接是个图片地址：同样等它加载成功再显示
+                        img {
+                            class: "tile-favicon",
+                            src: "{src}",
+                            alt: "",
+                            loading: "lazy",
+                            "data-ok": if icon_loaded() { "1" } else { "0" },
+                            onload: move |_| icon_loaded.set(true),
+                        }
                     } else if let Some(host) = icon_host.clone() {
-                        // 取到站点图标就盖在首字色块之上；404 时藏掉它，露出首字。
-                        // 但在 onerror 挂上之前就失败的（SSR 那批），这里收不到通知，
-                        // 由 CardGrid 挂载后补查一次补齐，见 dom::mark_broken_favicons。
-                        if !icon_failed() {
-                            img {
-                                class: "tile-favicon",
-                                src: "/icon/{host}",
-                                alt: "",
-                                loading: "lazy",
-                                onerror: move |_| icon_failed.set(true),
-                            }
+                        // 取到站点图标就盖在首字色块之上；加载成功前先藏着，
+                        // 露出底下的首字色块（见 assets/main.css 的 .tile-favicon）。
+                        //
+                        // SSR 那批 <img> 在 hydration 之前就加载完的，onload 收不到，
+                        // 由 CardGrid 挂载后补查一次补齐，见 dom::mark_loaded_favicons。
+                        img {
+                            class: "tile-favicon",
+                            src: "/icon/{host}",
+                            alt: "",
+                            loading: "lazy",
+                            "data-ok": if icon_loaded() { "1" } else { "0" },
+                            onload: move |_| icon_loaded.set(true),
                         }
                     }
                 }

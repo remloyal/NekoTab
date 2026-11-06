@@ -95,23 +95,21 @@ pub fn data_attr_at(_x: f64, _y: f64, _attr: &str) -> Option<String> {
     None
 }
 
-/// 给"已经加载失败"的站点图标打上 `data-broken`（CSS 会把它隐藏，露出下面的首字）。
+/// 给"已经加载成功"的站点图标打上 `data-ok`（CSS 据此把它显示出来）。
 ///
-/// 为什么需要这一刀：`<img>` 的 `error` 事件**不冒泡**，而 SSR 吐出的 HTML 里图片
-/// 就开始加载了——同源 `/icon/{host}` 返回 404 往往比 wasm 下载、hydration 都快，
-/// 等 Dioxus 把 `onerror` 挂上去，事件早发完了。那张卡片于是永远挂着浏览器的
-/// "碎图"占位符，还正好盖住底下的首字色块。
+/// 为什么需要这一刀：SSR 吐出的 HTML 里 `<img>` 就开始加载了，而 Rust 侧的
+/// `onload` 是 hydration 时才挂上去的——图标在 hydration 之前就加载完的那些，
+/// load 事件早发完了，那张卡片会一直停在首字色块上。
 ///
-/// hydration 之后补查一次 `naturalWidth` 就覆盖了这种情况：此刻还在飞的图片，
-/// 会在之后失败时派发 error，而那时 `onerror` 已经就位。此后新增的图片都是客户端
-/// 渲染的，监听在创建时就已挂好，`onerror` 自己管得住。
+/// hydration 之后补查一次 `naturalWidth` 就覆盖了这种情况。此刻还在飞的图片，
+/// 会在之后加载成功时派发 load，而那时 `onload` 已经就位。
 #[cfg(feature = "web")]
-pub async fn mark_broken_favicons() {
+pub async fn mark_loaded_favicons() {
     const SCRIPT: &str = r#"
         document.querySelectorAll('img.tile-favicon').forEach((img) => {
-            // complete 为真但拿不到宽高，就是"已经失败"（不是还在加载）
-            if (img.complete && img.naturalWidth === 0) {
-                img.setAttribute('data-broken', '');
+            // complete 为真且拿得到宽高，就是"已经加载成功"
+            if (img.complete && img.naturalWidth > 0) {
+                img.setAttribute('data-ok', '1');
             }
         });
     "#;
@@ -120,7 +118,7 @@ pub async fn mark_broken_favicons() {
 }
 
 #[cfg(not(feature = "web"))]
-pub async fn mark_broken_favicons() {}
+pub async fn mark_loaded_favicons() {}
 
 /// 焦点是否正停在"正在编辑的文本"上——翻页快捷键要不要让路就看它。
 ///
