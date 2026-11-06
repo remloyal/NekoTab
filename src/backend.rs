@@ -70,7 +70,7 @@ fn build_search_sql(keyword_count: usize, bookmarks_only: bool) -> String {
                            OR tags LIKE ? ESCAPE '\\')";
 
     let mut sql = String::from(
-        "SELECT id, title, url, description, tags, group_id, group_ids, icon, created_at, \
+        "SELECT id, title, url, description, tags, group_id, icon, created_at, \
          span_w, span_h, kind, config, surface, link_status, link_checked_at \
          FROM bookmarks WHERE deleted_at IS NULL",
     );
@@ -97,8 +97,6 @@ pub(crate) struct CleanBookmark {
     pub description: String,
     pub tags: String,
     pub group_id: Option<i64>,
-    /// 全部分组 id，逗号分隔；空串表示未分组。
-    pub group_ids: String,
     pub icon: String,
     pub span_w: i64,
     pub span_h: i64,
@@ -202,7 +200,6 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
             description: input.description.trim().to_string(),
             tags: String::new(),
             group_id: None,
-            group_ids: String::new(),
             icon,
             span_w,
             span_h,
@@ -222,31 +219,14 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
     }
 
     // 分组可能已被删掉，落库前确认一次；不存在就丢掉，免得留下指向空气的 id
-    // 让条目在任何分组标签下都不显示。`group_ids` 是新字段，旧调用方只传
-    // `group_id` 时退回单值。
-    let mut candidates: Vec<i64> = input.group_ids.clone();
-    if candidates.is_empty() {
-        if let Some(id) = input.group_id {
-            candidates.push(id);
-        }
-    }
+    // 让条目在任何分组标签下都不显示。
     let known_groups: Vec<i64> = sqlx::query_scalar("SELECT id FROM groups")
         .fetch_all(crate::db::pool())
         .await
         .map_err(|e| format!("读取分组失败: {e}"))?;
-    let mut group_ids: Vec<i64> = Vec::new();
-    // 先过滤再截断：否则前 20 个里混着重复/已删的 id 时，后面合法的反而被丢掉。
-    // 原始候选也设个上限，避免调用方塞一个超长数组来放大查询。
-    for id in candidates.into_iter().take(100) {
-        if id <= 0 || group_ids.contains(&id) || !known_groups.contains(&id) {
-            continue;
-        }
-        group_ids.push(id);
-        if group_ids.len() >= 20 {
-            break;
-        }
-    }
-    let group_id = group_ids.first().copied();
+    let group_id = input
+        .group_id
+        .filter(|id| *id > 0 && known_groups.contains(id));
 
     Ok(CleanBookmark {
         title,
@@ -254,11 +234,6 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
         description: input.description.trim().to_string(),
         tags: normalize_tags(&input.tags),
         group_id,
-        group_ids: group_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(","),
         icon,
         span_w,
         span_h,
@@ -368,9 +343,9 @@ pub(crate) async fn insert_new_bookmark(
     let kind = row.kind;
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO bookmarks \
-         (title, url, description, tags, group_id, group_ids, icon, span_w, span_h, kind, config, \
+         (title, url, description, tags, group_id, icon, span_w, span_h, kind, config, \
           surface, sort_order) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
                  COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
@@ -379,7 +354,6 @@ pub(crate) async fn insert_new_bookmark(
     .bind(row.description)
     .bind(row.tags)
     .bind(row.group_id)
-    .bind(row.group_ids)
     .bind(row.icon)
     .bind(row.span_w)
     .bind(row.span_h)
@@ -434,7 +408,6 @@ pub(crate) async fn quick_add(
             description: description.trim().to_string(),
             tags: String::new(),
             group_id: None,
-            group_ids: String::new(),
             icon: String::new(),
             // 快捷添加只给 URL，格子尺寸用默认的一格
             span_w: 1,
@@ -518,14 +491,13 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
 
     let affected = sqlx::query(
         "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
-         group_ids = ?, icon = ?, span_w = ?, span_h = ?, config = ?, surface = ? WHERE id = ?",
+         icon = ?, span_w = ?, span_h = ?, config = ?, surface = ? WHERE id = ?",
     )
     .bind(row.title)
     .bind(row.url)
     .bind(row.description)
     .bind(row.tags)
     .bind(row.group_id)
-    .bind(row.group_ids)
     .bind(row.icon)
     .bind(row.span_w)
     .bind(row.span_h)
@@ -647,13 +619,10 @@ pub async fn move_bookmarks(ids: Vec<i64>, group_id: Option<i64>) -> Result<usiz
     let mut affected = 0usize;
     for id in &ids {
         // 组件不属于任何分组：即使调用方误传了组件 id 也写不进去。
-        affected += sqlx::query(
-            "UPDATE bookmarks SET group_id = ?, group_ids = ? WHERE id = ? AND kind = ''",
-        )
-        .bind(group_id)
-        .bind(group_id.map(|id| id.to_string()).unwrap_or_default())
-        .bind(id)
-        .execute(&mut *tx)
+        affected += sqlx::query("UPDATE bookmarks SET group_id = ? WHERE id = ? AND kind = ''")
+            .bind(group_id)
+            .bind(id)
+            .execute(&mut *tx)
             .await
             .map_err(|e| ServerFnError::new(format!("移动分组失败: {e}")))?
             .rows_affected() as usize;
@@ -845,41 +814,16 @@ pub async fn delete_group(id: i64) -> Result<(), ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
 
     // 回收站里的书签也要一起归位，否则还原后仍指向已删的分组。
-    // 多分组之后不能只清 `group_id`：要把这个 id 从每条的 `group_ids` 里摘掉，
-    // 再按剩下的第一个重算主分组。书签量级不大（< 5000），逐条读改写最直白。
-    let rows: Vec<(i64, Option<i64>, String)> =
-        sqlx::query_as("SELECT id, group_id, group_ids FROM bookmarks")
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| ServerFnError::new(format!("读取组内书签失败: {e}")))?;
-    // 重算主分组时只认还存在的分组，避免把一条本来就悬空的 id 提成主分组。
-    let known_groups: Vec<i64> = sqlx::query_scalar("SELECT id FROM groups")
+    // 一条书签只属于一个分组，所以这里只要把 `group_id` 指到这个组的那些改成
+    // 未分组即可。书签量级不大（< 5000），逐条改最直白。
+    let rows: Vec<i64> = sqlx::query_scalar("SELECT id FROM bookmarks WHERE group_id = ?")
+        .bind(id)
         .fetch_all(&mut *tx)
         .await
-        .map_err(|e| ServerFnError::new(format!("读取分组失败: {e}")))?;
+        .map_err(|e| ServerFnError::new(format!("读取组内书签失败: {e}")))?;
 
-    for (bookmark_id, primary, raw) in rows {
-        // 与 `Bookmark::group_id_list` 用同一个解析器：主分组也参与判断，
-        // 否则"只有 group_id 指向要删的组"的老数据会被漏掉。
-        let ids = crate::models::parse_group_ids(&raw, primary);
-        let references = primary == Some(id) || ids.iter().any(|known| *known == id);
-        if !references {
-            continue;
-        }
-
-        let remaining: Vec<i64> = ids
-            .into_iter()
-            .filter(|known| *known != id && known_groups.contains(known))
-            .collect();
-        let next_primary = remaining.first().copied();
-        let next_raw = remaining
-            .iter()
-            .map(|known| known.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        sqlx::query("UPDATE bookmarks SET group_id = ?, group_ids = ? WHERE id = ?")
-            .bind(next_primary)
-            .bind(next_raw)
+    for bookmark_id in rows {
+        sqlx::query("UPDATE bookmarks SET group_id = NULL WHERE id = ?")
             .bind(bookmark_id)
             .execute(&mut *tx)
             .await
@@ -1307,19 +1251,11 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         }
 
         // 备份里的分组名：没有就建一个，保证还原后分组结构还在。
-        // 多分组备份带 `groups`；旧备份只有 `group`，退回单值。
-        let mut wanted: Vec<String> = item.groups.clone();
-        if wanted.is_empty() && !item.group.trim().is_empty() {
-            wanted.push(item.group.trim().to_string());
-        }
-        let mut bookmark_group_ids: Vec<i64> = Vec::new();
-        for name in wanted {
-            let name = name.trim();
-            if name.is_empty() || bookmark_group_ids.len() >= 20 {
-                continue;
-            }
-            let id = match group_ids.get(name) {
-                Some(id) => *id,
+        // 一条书签只属于一个分组，所以只认 `group` 一个名字。
+        let group_id = match item.group.trim() {
+            name if name.is_empty() => None,
+            name => match group_ids.get(name) {
+                Some(id) => Some(*id),
                 None => {
                     next_group_sort += 1;
                     let id = sqlx::query_scalar::<_, i64>(
@@ -1331,19 +1267,10 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
                     .await
                     .map_err(|e| ServerFnError::new(format!("创建分组失败: {e}")))?;
                     group_ids.insert(name.to_string(), id);
-                    id
+                    Some(id)
                 }
-            };
-            if !bookmark_group_ids.contains(&id) {
-                bookmark_group_ids.push(id);
-            }
-        }
-        let group_id = bookmark_group_ids.first().copied();
-        let group_ids_csv = bookmark_group_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+            },
+        };
 
         next_sort += 1;
 
@@ -1363,15 +1290,14 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
 
         sqlx::query(
             "INSERT INTO bookmarks \
-             (title, url, description, tags, group_id, group_ids, icon, span_w, span_h, sort_order) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (title, url, description, tags, group_id, icon, span_w, span_h, sort_order) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(if title.is_empty() { url.clone() } else { title })
         .bind(&url)
         .bind(item.description.trim())
         .bind(normalize_tags(&item.tags))
         .bind(group_id)
-        .bind(&group_ids_csv)
         .bind(item.icon.trim())
         // JSON 备份里的跨度原样搬回（Netscape 解析出来的恒为 1）
         .bind(clamp_span(item.span_w))
@@ -1426,12 +1352,11 @@ pub async fn export_bookmarks_json() -> String {
     let items: Vec<ImportedBookmark> = rows
         .iter()
         .map(|bookmark| {
-            let names: Vec<String> = bookmark
-                .group_id_list()
-                .into_iter()
-                .filter_map(|id| group_names.get(&id).cloned())
-                .collect();
-            ImportedBookmark::from_bookmark(bookmark, &names)
+            let name = bookmark
+                .group_id
+                .and_then(|id| group_names.get(&id).cloned())
+                .unwrap_or_default();
+            ImportedBookmark::from_bookmark(bookmark, &name)
         })
         .collect();
 
@@ -1480,9 +1405,8 @@ pub async fn export_bookmarks_html() -> String {
             url: bookmark.url.clone(),
             description: bookmark.description.clone(),
             group: bookmark
-                .group_id_list()
-                .first()
-                .and_then(|id| group_names.get(id).cloned())
+                .group_id
+                .and_then(|id| group_names.get(&id).cloned())
                 .unwrap_or_default(),
         })
         .collect();
@@ -2111,7 +2035,7 @@ mod tests {
                 description TEXT NOT NULL DEFAULT '',
                 tags        TEXT NOT NULL DEFAULT '',
                 group_id    INTEGER,
-                -- 与迁移 007 一致：多分组的完整归属（逗号分隔）
+                -- 迁移 007 留下的多分组列，迁移 011 起不再被读写（真实库里仍在）
                 group_ids   TEXT NOT NULL DEFAULT '',
                 icon        TEXT NOT NULL DEFAULT '',
                 created_at  TEXT NOT NULL DEFAULT (datetime('now')),
@@ -2290,20 +2214,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_group_ids_are_stored_and_read_back() {
+    async fn a_bookmark_belongs_to_one_group() {
         let pool = seed().await;
 
-        let mut card = row("多分组", "https://multi.test");
-        card.group_id = Some(1);
-        card.group_ids = "1,2".to_string();
+        let mut card = row("单分组", "https://single.test");
+        card.group_id = Some(2);
         let outcome = insert_new_bookmark(&pool, card).await.expect("insert");
         assert!(outcome.created);
 
         let items = run(&pool, "").await;
-        let card = items.iter().find(|b| b.title == "多分组").unwrap();
-        assert_eq!(card.group_id, Some(1), "主分组是第一个");
-        assert_eq!(card.group_ids, "1,2");
-        assert_eq!(card.group_id_list(), vec![1, 2]);
+        let card = items.iter().find(|b| b.title == "单分组").unwrap();
+        assert_eq!(card.group_id, Some(2), "分组原样存回");
     }
 
     #[test]
@@ -2337,7 +2258,6 @@ mod tests {
             description: String::new(),
             tags: String::new(),
             group_id: None,
-            group_ids: String::new(),
             icon: String::new(),
             span_w: 1,
             span_h: 1,
@@ -2355,7 +2275,6 @@ mod tests {
             description: String::new(),
             tags: String::new(),
             group_id: None,
-            group_ids: String::new(),
             icon: String::new(),
             span_w: 2,
             span_h: 2,

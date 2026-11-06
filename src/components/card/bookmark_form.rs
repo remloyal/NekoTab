@@ -78,21 +78,15 @@ pub fn BookmarkForm(
             .map(|b| b.surface.clone())
             .unwrap_or_default()
     });
-    // 一条书签可以属于多个分组；老数据只 group_id 时也在这里统一成列表。
-    // 指向已删除分组的 id 先滤掉，避免"网格里显示未分组、弹窗里却没选中任何分组"。
+    // 一条书签只属于一个分组。指向已删除分组的 id 先滤掉，
+    // 避免"网格里显示未分组、弹窗里却没选中任何分组"。
     let known_group_ids: Vec<i64> = groups.iter().map(|group| group.id).collect();
-    let mut group_ids = use_signal(|| {
+    let mut group_id = use_signal(|| {
         existing
             .as_ref()
-            .map(|b| {
-                b.group_id_list()
-                    .into_iter()
-                    .filter(|id| known_group_ids.contains(id))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|ids| !ids.is_empty())
-            .or_else(|| default_group.map(|id| vec![id]))
-            .unwrap_or_default()
+            .and_then(|b| b.group_id)
+            .filter(|id| known_group_ids.contains(id))
+            .or(default_group)
     });
     // 卡片占几格。老数据没有这个字段（0）时按一格显示
     let mut span_w = use_signal(|| clamp_span(existing.as_ref().map(|b| b.span_w).unwrap_or(1)));
@@ -177,9 +171,7 @@ pub fn BookmarkForm(
                 url: url(),
                 description: description(),
                 tags,
-                // 主分组取第一个；完整归属由 group_ids 承载
-                group_id: group_ids().first().copied(),
-                group_ids: group_ids(),
+                group_id: group_id(),
                 icon: icon(),
                 span_w: span_w(),
                 span_h: span_h(),
@@ -295,35 +287,26 @@ pub fn BookmarkForm(
             }
 
             div { class: "field",
-                span { class: "field-label", "分组（可多选）" }
+                span { class: "field-label", "分组" }
                 div { class: "segmented wrap",
                     button {
-                        class: if group_ids().is_empty() { "segment active" } else { "segment" },
+                        class: if group_id().is_none() { "segment active" } else { "segment" },
                         r#type: "button",
-                        onclick: move |_| group_ids.set(Vec::new()),
+                        onclick: move |_| group_id.set(None),
                         "未分组"
                     }
                     for group in groups {
                         button {
                             key: "{group.id}",
-                            class: if group_ids().contains(&group.id) { "segment active" } else { "segment" },
+                            class: if group_id() == Some(group.id) { "segment active" } else { "segment" },
                             r#type: "button",
-                            onclick: move |_| {
-                                let id = group.id;
-                                let mut list = group_ids();
-                                if let Some(pos) = list.iter().position(|known| *known == id) {
-                                    list.remove(pos);
-                                } else {
-                                    list.push(id);
-                                }
-                                group_ids.set(list);
-                            },
+                            onclick: move |_| group_id.set(Some(group.id)),
                             "{group.name}"
                         }
                     }
                 }
                 p { class: "field-hint",
-                    "一条书签可以同时出现在多个分类标签页下；一个都不选就是「未分组」。"
+                    "一条书签归一个分组；选「未分组」就是不放进任何分类。"
                     "分组在设置 → 分组管理里增删。"
                 }
             }

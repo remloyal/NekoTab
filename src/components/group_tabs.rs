@@ -75,8 +75,9 @@ pub fn GroupTabs(tabs: Vec<GroupTab>, active: String, on_select: EventHandler<St
 /// 标签栏里，点进去显示空态，反而能说明"分组在、只是还没放书签"。
 /// 「未分组」是合成项，仍然只在真有未分组书签时出现。
 ///
-/// `total` 是结果集里**书签的条数**，不是 `counts` 的和：多分组书签会在多个
-/// 分组下各计一次，加起来会大于「全部」。
+/// `total` 是结果集里**书签的条数**。一条书签只属于一个分组，所以各分组计数
+/// 加起来正好等于它——但仍然直接传总数，不在这里加总（万一将来又出现一条
+/// 书签落进多个分组的情况，加总会悄悄大于「全部」）。
 pub fn build_tabs(
     groups: &[Group],
     counts: &std::collections::HashMap<String, usize>,
@@ -143,15 +144,15 @@ mod tests {
         counts.insert(GROUP_UNGROUPED.to_string(), 2);
         counts.insert(group_value(1), 3);
 
-        // 多分组时 counts 之和会大于书签数（同一条在两个组里各计一次）；
-        // 「全部」必须用调用方传进来的书签数，而不是把 counts 加起来。
-        let total = 4;
+        // 一条书签只属于一个分组，所以各分组计数之和正好等于书签总数；
+        // 「全部」用调用方传进来的总数，而不是把 counts 加起来。
+        let total = 5;
         let tabs = build_tabs(&groups, &counts, total);
         let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
 
         assert_eq!(labels, vec!["全部", "未分组", "开发", "空分组"]);
-        assert_eq!(tabs[0].count, 4, "全部用书签数，不重复计数");
-        assert_eq!(counts.values().sum::<usize>(), 5, "分组计数允许大于总数");
+        assert_eq!(tabs[0].count, 5, "全部用书签总数");
+        assert_eq!(counts.values().sum::<usize>(), 5, "分组计数之和与总数一致");
         assert_eq!(tabs[2].count, 3);
         assert_eq!(tabs[3].count, 0, "新建的空分组也要出现在标签栏里");
     }

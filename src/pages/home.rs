@@ -87,18 +87,15 @@ fn move_to_position(full: &[i64], dragged: i64, target: i64) -> Option<Vec<i64>>
     Some(order)
 }
 
-/// 一条书签的有效分组列表：指向已删除分组的 id 被丢掉，剩下的按原顺序去重。
+/// 一条书签的有效分组：指向已删除分组的 id 视为未分组。
 ///
-/// 删除分组时服务端会把该 id 从 `group_ids` 里摘掉，正常流程不会留下悬空引用；
+/// 删除分组时服务端会把组内书签的 `group_id` 清空，正常流程不会留下悬空引用；
 /// 这里兜住的是"删分组与读列表并发"这类边角，避免书签在任何标签下都看不见。
-fn effective_groups(bookmark: &Bookmark, known: &HashSet<i64>) -> Vec<i64> {
-    let mut out: Vec<i64> = Vec::new();
-    for id in bookmark.group_id_list() {
-        if known.contains(&id) && !out.contains(&id) {
-            out.push(id);
-        }
+fn effective_group(bookmark: &Bookmark, known: &HashSet<i64>) -> Option<i64> {
+    match bookmark.group_id {
+        Some(id) if known.contains(&id) => Some(id),
+        _ => None,
     }
-    out
 }
 
 /// 关键词匹配：空格分词，词之间 AND，每词在 title / url / description / tags 里找。
@@ -157,19 +154,15 @@ fn rotation_index(pool: &[String], nonce: &str) -> Option<usize> {
 
 /// 按分组过滤值统计条数，键与标签页的 `value` 一致。
 ///
-/// 多分组书签会在它所属的每个分组下各计一次；一条分组都没归的记账到「未分组」。
-/// 「全部」的条数不能把这张表加起来（会重复计数），由调用方单独传总数。
+/// 一条书签只属于一个分组，所以每个标签页的条数加起来正好等于总数——
+/// 不再有"多分组书签被重复计数"的问题。没归组的记到「未分组」。
 fn count_by_group(items: &[Bookmark], known: &HashSet<i64>) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::new();
 
     for item in items {
-        let groups = effective_groups(item, known);
-        if groups.is_empty() {
-            *counts.entry(GROUP_UNGROUPED.to_string()).or_insert(0) += 1;
-        } else {
-            for id in groups {
-                *counts.entry(group_value(id)).or_insert(0) += 1;
-            }
+        match effective_group(item, known) {
+            None => *counts.entry(GROUP_UNGROUPED.to_string()).or_insert(0) += 1,
+            Some(id) => *counts.entry(group_value(id)).or_insert(0) += 1,
         }
     }
 
@@ -318,8 +311,8 @@ pub fn Home() -> Element {
         .into_iter()
         .filter(|item| match filter {
             Filter::All => true,
-            Filter::Ungrouped => effective_groups(item, &known_group_ids).is_empty(),
-            Filter::Group(id) => effective_groups(item, &known_group_ids).contains(&id),
+            Filter::Ungrouped => effective_group(item, &known_group_ids).is_none(),
+            Filter::Group(id) => effective_group(item, &known_group_ids) == Some(id),
         })
         .collect();
 
@@ -1294,7 +1287,6 @@ mod tests {
             description: description.to_string(),
             tags: tags.to_string(),
             group_id: None,
-            group_ids: String::new(),
             icon: String::new(),
             created_at: String::new(),
             span_w: 1,
@@ -1352,21 +1344,14 @@ mod tests {
         let known: HashSet<i64> = [1, 2].into_iter().collect();
 
         let mut item = bookmark(1, "A", "https://a.com", "", "");
-        item.group_ids = "1".to_string();
-        assert_eq!(effective_groups(&item, &known), vec![1]);
+        item.group_id = Some(1);
+        assert_eq!(effective_group(&item, &known), Some(1));
 
-        item.group_ids = "99".to_string();
-        assert!(
-            effective_groups(&item, &known).is_empty(),
-            "指向已删分组＝未分组"
-        );
+        item.group_id = Some(99);
+        assert_eq!(effective_group(&item, &known), None, "指向已删分组＝未分组");
 
-        item.group_ids = String::new();
-        assert!(effective_groups(&item, &known).is_empty());
-
-        // 多分组：已知的留下，未知的丢掉，顺序保持
-        item.group_ids = "2,99,1,2".to_string();
-        assert_eq!(effective_groups(&item, &known), vec![2, 1]);
+        item.group_id = None;
+        assert_eq!(effective_group(&item, &known), None);
     }
 
     #[test]

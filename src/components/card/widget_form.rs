@@ -130,7 +130,6 @@ pub fn WidgetForm(
             description: keep_description.clone(),
             tags: String::new(),
             group_id: None,
-            group_ids: Vec::new(),
             icon: keep_icon.clone(),
             span_w: span_w(),
             span_h: span_h(),

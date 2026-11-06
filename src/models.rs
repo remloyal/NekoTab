@@ -12,15 +12,11 @@ pub struct Bookmark {
     /// 逗号分隔的标签串，如 `"rust,web,工具"`。标签不再是分类（分类见 `Group`），
     /// 只作为检索词，服务端搜索与客户端筛选都会匹配它。
     pub tags: String,
-    /// 主分组；`None` 即"未分组"（不占一行，由前端合成）。
+    /// 所属分组；`None` 即"未分组"（不占一行，由前端合成）。
     ///
-    /// 多分组上线后这一列仍然保留：一条书签可以同时属于多个分组，这里存第一个，
-    /// 供只认识单分组的旧代码（Netscape 导出、快捷添加）使用。完整归属看
-    /// [`Bookmark::group_id_list`]（读 `group_ids`）。
+    /// 一条书签只属于一个分组。库里还有一个 `group_ids` 列（迁移 007 留下的），
+    /// 它从此不再被读写——见迁移 011 的说明。
     pub group_id: Option<i64>,
-    /// 全部分组 id，逗号分隔（如 `"3,7"`）；空串表示未分组。
-    #[serde(default)]
-    pub group_ids: String,
     /// 自定义图标。空串表示自动（按 host 代取），其余取值与分组图标同一套约定，
     /// 见 [`crate::components::icons`]：`i:xxx` 内置图标 / `http…` 图片地址 / `/…` 本站路径。
     pub icon: String,
@@ -617,10 +613,6 @@ pub struct NewBookmark {
     /// 留空表示"未分组"
     #[serde(default)]
     pub group_id: Option<i64>,
-    /// 归属的多个分组；为空表示未分组。服务端会校验、去重，并把第一个写进
-    /// `group_id`（兼容只认识单分组的旧路径）。
-    #[serde(default)]
-    pub group_ids: Vec<i64>,
     /// 留空表示自动取站点图标
     #[serde(default)]
     pub icon: String,
@@ -642,14 +634,6 @@ pub struct NewBookmark {
 }
 
 impl Bookmark {
-    /// 这张卡片归属的分组 id 列表。
-    ///
-    /// `group_ids` 是逗号分隔串（与 `tags` 同一套存储习惯）；老数据只有
-    /// `group_id`，这里会退回读它。解析时去重、丢掉非正数与非法项。
-    pub fn group_id_list(&self) -> Vec<i64> {
-        parse_group_ids(&self.group_ids, self.group_id)
-    }
-
     /// 这张卡片是不是组件。未知 kind 按书签处理——渲染层因此不会碰到没见过的分支。
     pub fn is_widget(&self) -> bool {
         is_widget_kind(&self.kind)
@@ -661,28 +645,6 @@ impl Bookmark {
     pub fn surface_class(&self) -> &'static str {
         effective_surface(&self.surface, self.is_widget())
     }
-}
-
-/// 解析 `group_ids` 逗号串，并补上主分组。
-///
-/// 主分组不在串里时也收进来：旧版本二进制只写 `group_id`，或在回滚后写回
-/// `group_id`，这种情况下"串里没有、主分组有"不应该让书签从它原来的分类里消失。
-/// 新代码写入的两列始终一致，所以这条分支只对历史/混合版本数据起作用。
-pub fn parse_group_ids(raw: &str, primary: Option<i64>) -> Vec<i64> {
-    let mut out: Vec<i64> = Vec::new();
-    for part in raw.split(',') {
-        if let Ok(id) = part.trim().parse::<i64>() {
-            if id > 0 && !out.contains(&id) {
-                out.push(id);
-            }
-        }
-    }
-    if let Some(id) = primary {
-        if id > 0 && !out.contains(&id) {
-            out.push(id);
-        }
-    }
-    out
 }
 
 /// 新增书签的结果。
@@ -1343,12 +1305,9 @@ pub struct ImportedBookmark {
     pub description: String,
     #[serde(default)]
     pub tags: String,
-    /// 分组名（首个，兼容旧备份）
+    /// 分组名；空串表示未分组
     #[serde(default)]
     pub group: String,
-    /// 全部分组名（多分组备份）。旧备份没有这一项时，导入端会退回 `group`。
-    #[serde(default)]
-    pub groups: Vec<String>,
     /// 自定义图标（与 `Bookmark::icon` 同一套约定）
     #[serde(default)]
     pub icon: String,
@@ -1369,14 +1328,17 @@ pub struct ImportedBookmark {
 
 #[cfg(feature = "server")]
 impl ImportedBookmark {
-    pub fn from_bookmark(bookmark: &Bookmark, group_names: &[String]) -> Self {
+    /// 从库里的书签转成导出用的一条。
+    ///
+    /// `group_name` 是分组名；空串表示未分组。一条书签只属于一个分组，
+    /// 所以这里只接一个名字。
+    pub fn from_bookmark(bookmark: &Bookmark, group_name: &str) -> Self {
         Self {
             title: bookmark.title.clone(),
             url: bookmark.url.clone(),
             description: bookmark.description.clone(),
             tags: bookmark.tags.clone(),
-            group: group_names.first().cloned().unwrap_or_default(),
-            groups: group_names.to_vec(),
+            group: group_name.to_string(),
             icon: bookmark.icon.clone(),
             span_w: bookmark.span_w,
             span_h: bookmark.span_h,
@@ -1859,7 +1821,6 @@ mod tests {
             description: String::new(),
             tags: String::new(),
             group_id: None,
-            group_ids: String::new(),
             icon: String::new(),
             created_at: String::new(),
             span_w: 1,
@@ -1878,16 +1839,6 @@ mod tests {
 
         card.surface = "solid".to_string();
         assert_eq!(card.surface_class(), "solid", "明确设过的压过默认");
-    }
-
-    #[test]
-    fn group_ids_union_primary() {
-        assert_eq!(parse_group_ids("1,2", Some(1)), vec![1, 2]);
-        // 混合版本：旧二进制只改 group_id，主分组不在串里时也要保留
-        assert_eq!(parse_group_ids("1,2", Some(3)), vec![1, 2, 3]);
-        assert_eq!(parse_group_ids("abc", Some(5)), vec![5]);
-        assert_eq!(parse_group_ids("2,2,0,-1", None), vec![2]);
-        assert!(parse_group_ids("", None).is_empty());
     }
 
     #[test]

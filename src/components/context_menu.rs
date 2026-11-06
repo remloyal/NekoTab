@@ -80,11 +80,10 @@ pub fn ContextMenu(
 
                 if !card.is_widget() {
                     li { class: "menu-item has-sub",
-                        span { class: "menu-row", "移到分组（会替换）" }
+                        span { class: "menu-row", "移到分组" }
                         ul { class: "submenu",
-                            li { class: "menu-hint", "点一个分组会替换它现在的全部分组" }
                             li {
-                                class: if card.group_id_list().is_empty() {
+                                class: if card.group_id.is_none() {
                                     "menu-item active"
                                 } else {
                                     "menu-item"
@@ -92,7 +91,7 @@ pub fn ContextMenu(
                                 onclick: {
                                     let selected = card.clone();
                                     move |_| {
-                                        if selected.group_id_list().is_empty() {
+                                        if selected.group_id.is_none() {
                                             on_close.call(());
                                         } else {
                                             on_move.call((selected.clone(), None));
@@ -103,9 +102,7 @@ pub fn ContextMenu(
                             }
                             for group in groups {
                                 {
-                                    let list = card.group_id_list();
-                                    let active = list.contains(&group.id);
-                                    let only_this = list.len() == 1 && active;
+                                    let active = card.group_id == Some(group.id);
                                     rsx! {
                                         li {
                                             key: "{group.id}",
@@ -114,7 +111,7 @@ pub fn ContextMenu(
                                                 let selected = card.clone();
                                                 let id = group.id;
                                                 move |_| {
-                                                    if only_this {
+                                                    if active {
                                                         on_close.call(());
                                                     } else {
                                                         on_move.call((selected.clone(), Some(id)));
