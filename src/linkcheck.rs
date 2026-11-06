@@ -53,8 +53,11 @@ pub async fn probe(url: &str, client: &reqwest::Client) -> (String, String) {
 /// 2xx 与 3xx 都算"通"：301 / 302 是站点换了地址，浏览器跟着跳就完了，
 /// 不算坏链。401 / 403 也算通——站点在，只是要登录，把它判成坏链就等于
 /// 冤枉了人家（而且这类站点往往正是常用站点）。
+///
+/// 429（请求太频繁）同样算通：它能回这个码，说明服务是活的，只是把我们拦住了。
+/// 一口气探几十条正好容易撞上限流，判成坏链会一片红。
 pub fn classify(status: u16) -> (String, String) {
-    if (200..400).contains(&status) || status == 401 || status == 403 {
+    if (200..400).contains(&status) || matches!(status, 401 | 403 | 429) {
         (LINK_OK.to_string(), String::new())
     } else {
         (LINK_BROKEN.to_string(), format!("HTTP {status}"))
@@ -137,10 +140,12 @@ mod tests {
     }
 
     #[test]
-    fn auth_errors_are_not_broken() {
+    fn auth_errors_and_rate_limits_are_not_broken() {
         // 要登录的站点也是"活的"——把它判成坏链就等于冤枉人家
         assert_eq!(classify(401).0, LINK_OK);
         assert_eq!(classify(403).0, LINK_OK);
+        // 429 说明服务活着、只是把我们限流了；一口气探几十条很容易撞上
+        assert_eq!(classify(429).0, LINK_OK);
     }
 
     #[test]
