@@ -490,11 +490,16 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
     }
 
     let affected = sqlx::query(
+        // 网址变了就把上次的链接检查结果作废：旧地址的 404 不该挂在新地址上。
+        // `CASE` 里读到的是 UPDATE 之前的 `url`，正好用来判断"改没改"。
         "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
-         icon = ?, span_w = ?, span_h = ?, config = ?, surface = ? WHERE id = ?",
+         icon = ?, span_w = ?, span_h = ?, config = ?, surface = ?, \
+         link_status = CASE WHEN url <> ? THEN '' ELSE link_status END, \
+         link_checked_at = CASE WHEN url <> ? THEN '' ELSE link_checked_at END \
+         WHERE id = ?",
     )
     .bind(row.title)
-    .bind(row.url)
+    .bind(&row.url)
     .bind(row.description)
     .bind(row.tags)
     .bind(row.group_id)
@@ -503,6 +508,8 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
     .bind(row.span_h)
     .bind(row.config)
     .bind(row.surface)
+    .bind(&row.url)
+    .bind(&row.url)
     .bind(id)
     .execute(db::pool())
     .await
@@ -1228,7 +1235,7 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| ServerFnError::new(format!("读取分组失败: {e}")))?;
-    let mut group_ids: std::collections::HashMap<String, i64> =
+    let mut group_name_to_id: std::collections::HashMap<String, i64> =
         rows.into_iter().map(|(id, name)| (name, id)).collect();
     let mut next_group_sort: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) FROM groups")
@@ -1254,7 +1261,7 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         // 一条书签只属于一个分组，所以只认 `group` 一个名字。
         let group_id = match item.group.trim() {
             name if name.is_empty() => None,
-            name => match group_ids.get(name) {
+            name => match group_name_to_id.get(name) {
                 Some(id) => Some(*id),
                 None => {
                     next_group_sort += 1;
@@ -1266,7 +1273,7 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
                     .fetch_one(&mut *tx)
                     .await
                     .map_err(|e| ServerFnError::new(format!("创建分组失败: {e}")))?;
-                    group_ids.insert(name.to_string(), id);
+                    group_name_to_id.insert(name.to_string(), id);
                     Some(id)
                 }
             },

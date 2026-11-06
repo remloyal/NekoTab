@@ -108,16 +108,15 @@ pub async fn probe_all(items: Vec<(i64, String, String)>) -> Vec<LinkCheck> {
         }
 
         for task in tasks {
-            match task.await {
-                Ok((id, title, url, status, detail)) => out.push(LinkCheck {
+            // 任务本身炸了（极少）就跳过：别让一条把整轮检测带崩
+            if let Ok((id, title, url, status, detail)) = task.await {
+                out.push(LinkCheck {
                     id,
                     title,
                     url,
                     status,
                     detail,
-                }),
-                // 任务本身炸了（极少）：算不可达，别让一条把整轮检测带崩
-                Err(_) => {}
+                });
             }
         }
     }

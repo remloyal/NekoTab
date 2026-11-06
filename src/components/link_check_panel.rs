@@ -16,6 +16,8 @@ use crate::models::{LinkCheck, LINK_BROKEN, LINK_UNREACHABLE};
 pub fn LinkCheckPanel(on_changed: EventHandler<()>) -> Element {
     let mut checking = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);
+    // 做成了什么（成功提示）。与 `error` 分开：成功不该显示成红色的错误
+    let mut note = use_signal(|| Option::<String>::None);
     // 检测结果。`None` = 还没查过；`Some(vec![])` = 查过，没有书签
     let mut results = use_signal(|| Option::<Vec<LinkCheck>>::None);
     let mut confirming_delete = use_signal(|| false);
@@ -42,6 +44,7 @@ pub fn LinkCheckPanel(on_changed: EventHandler<()>) -> Element {
         spawn(async move {
             checking.set(true);
             error.set(None);
+            note.set(None);
             confirming_delete.set(false);
 
             match check_links(Vec::new()).await {
@@ -67,6 +70,7 @@ pub fn LinkCheckPanel(on_changed: EventHandler<()>) -> Element {
         spawn(async move {
             checking.set(true);
             error.set(None);
+            note.set(None);
             confirming_delete.set(false);
 
             match delete_bookmarks(ids.clone()).await {
@@ -76,7 +80,7 @@ pub fn LinkCheckPanel(on_changed: EventHandler<()>) -> Element {
                         list.retain(|item| !ids.contains(&item.id));
                         results.set(Some(list));
                     }
-                    error.set(Some(format!("已移入回收站 {count} 条")));
+                    note.set(Some(format!("已移入回收站 {count} 条，可去回收站还原")));
                 }
                 Err(e) => error.set(Some(error_text(&e))),
             }
@@ -90,9 +94,13 @@ pub fn LinkCheckPanel(on_changed: EventHandler<()>) -> Element {
         spawn(async move {
             checking.set(true);
             error.set(None);
+            note.set(None);
 
             match clear_link_status().await {
-                Ok(_) => results.set(None),
+                Ok(_) => {
+                    results.set(None);
+                    note.set(Some("已清除卡片上的坏链标记".to_string()));
+                }
                 Err(e) => error.set(Some(error_text(&e))),
             }
 
@@ -118,19 +126,22 @@ pub fn LinkCheckPanel(on_changed: EventHandler<()>) -> Element {
                     onclick: run,
                     if checking() { "检测中…" } else { "检测全部链接" }
                 }
-                if results().is_some() {
-                    button {
-                        class: "btn-ghost",
-                        r#type: "button",
-                        disabled: checking(),
-                        onclick: clear,
-                        "清除检测结果"
-                    }
+                // 不跟「有没有结果」绑定：切换过分区之后结果列表会丢，
+                // 但卡片上的标记还在——这时仍然要能清掉
+                button {
+                    class: "btn-ghost",
+                    r#type: "button",
+                    disabled: checking(),
+                    onclick: clear,
+                    "清除检测结果"
                 }
             }
 
             if let Some(message) = error() {
                 p { class: "form-error", "{message}" }
+            }
+            if let Some(message) = note() {
+                p { class: "field-hint", "{message}" }
             }
 
             if checking() {
