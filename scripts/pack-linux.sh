@@ -87,6 +87,13 @@ fi
 # 多出来就是上面的清理没生效。
 echo "   -> public 资源合计 $(du -sh "$DX_OUT/public" | cut -f1)，wasm $(ls -1 "$DX_OUT/public/assets/"*.wasm 2>/dev/null | wc -l) 份"
 
+# 分包护栏：漏传 --wasm-split / --features wasm-split 时构建也会成功，只是静默退化成
+# 单包。这里兜住——只要还标着 #[component(lazy)]，就必须有 module_*.wasm。
+if ! compgen -G "$DX_OUT/public/assets/module_*.wasm" >/dev/null; then
+    echo "!! 没有产出懒加载 chunk：确认 dx build 带了 --features wasm-split 和 --wasm-split" >&2
+    exit 1
+fi
+
 stage() {         # $1=服务端二进制路径  $2=输出目录
     local dest="$REPO_ROOT/$2"
     rm -rf "$dest"
