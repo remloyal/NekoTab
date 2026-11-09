@@ -12,7 +12,7 @@ use crate::models::{LinkCheck, LINK_BROKEN, LINK_UNREACHABLE};
 /// * **不可达**（连不上 / 超时 / DNS 失败）——多半是内网地址、要登录的站点、
 ///   或者服务器所在网络到不了的域名，**不等于坏链**，所以不给一键删除；
 /// * 正常的不列，只报个总数。
-#[component]
+#[component(lazy)]
 pub fn LinkCheckPanel(on_changed: EventHandler<()>) -> Element {
     let mut checking = use_signal(|| false);
     let mut error = use_signal(|| Option::<String>::None);

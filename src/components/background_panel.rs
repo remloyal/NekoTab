@@ -181,7 +181,7 @@ async fn delete_file(url: &str) -> Result<(), String> {
 /// 池底下还有一条「本机还有 N 张没在池里」的折叠条带：本机文件不等于池里条目
 /// （旧版本上传的、手动丢进 `WALLPAPER_DIR` 的、被移出池的都在这一档），没有它
 /// 那些文件会从界面上消失、删不掉，而壁纸目录是不参与任何自动清理的。
-#[component]
+#[component(lazy)]
 pub fn BackgroundPanel(
     /// 背景池（设置草稿里的那份）
     pool: Vec<String>,

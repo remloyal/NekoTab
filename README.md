@@ -33,7 +33,7 @@
 
 | 层 | 选型 |
 |----|------|
-| 全栈框架 | Dioxus 0.7.10（`fullstack` + `router`） |
+| 全栈框架 | Dioxus 0.7.10（`fullstack`；发布构建开启 wasm 分包） |
 | 服务端 | Axum 0.8（由 `dioxus::serve` 托管） |
 | 数据库 | SQLite + sqlx 0.9（异步连接池，WAL） |
 | 序列化 | serde / serde_json |
@@ -87,7 +87,7 @@
     ├── quickadd.rs               # 快捷添加：令牌存取 + /api/bookmark 两个处理器（仅 server，含单测）
     ├── transfer.rs               # 书签导入解析 / JSON 与 Netscape 导出（仅 server，含单测）
     ├── wallpaper.rs              # 壁纸：上传落盘 / 列表（带体积）/ 删除 / 回发 / 抓外链存本地（仅 server，含单测）
-    ├── routes.rs                 # Routable，仅 "/"
+    ├── pages/home.rs             # 首页（唯一页面）
     ├── auth.rs                   # 可选访问密码：登录页 / 签名 Cookie / 守卫中间件（仅 server，含单测）
     ├── hot.rs                    # 热搜数据源：五个源地址 + 响应解析 + 十分钟缓存（仅 server，含单测）
     ├── suggest.rs                # 搜索联想：认引擎端点 + 解析各家响应（仅 server，含单测）
@@ -199,14 +199,25 @@ cargo check --no-default-features --features web --target wasm32-unknown-unknown
 ## 生产构建
 
 ```bash
-dx build --release --platform web
+# 三个参数缺一不可：
+#   --features wasm-split 让 #[component(lazy)] 走懒加载（开发构建不开，dx serve 不受影响）
+#   --wasm-split          让 dx 把懒加载组件拆成独立 .wasm chunk
+#   --debug-symbols=false 拆完后再去掉调试信息（主包 br 528KB -> 469KB）
+# 用 @client 限定只作用于客户端，服务端不必带 wasm-split。
+dx build --release --platform web \
+    @client --features wasm-split --wasm-split --debug-symbols=false
 ```
 
 产物在 `target/dx/nekotab/release/web/`：客户端资源在 `public/`，
 服务端二进制名为 `server`（Windows 下 `server.exe`）。
 
 **务必用 release 构建对外提供服务。** 开发构建的 wasm 有 63 MB（不优化且带调试
-信息），正式构建约 1.4 MB，brotli 后约 400 KB。
+信息）；正式构建首屏主包约 1.6 MB，brotli 后约 460 KB。设置面板、添加卡片弹窗、
+搜索引擎设置都走懒加载，各自是 `public/assets/module_*.wasm`，点到时才下载：
+
+- 设置面板外壳约 33 KB（br）；背景 / 分组管理 / 链接检查 / 回收站 / 快捷添加
+  各是一个子 chunk，约 8–26 KB，切到对应标签页才下
+- 添加卡片弹窗约 6 KB；搜索引擎设置约 11 KB
 
 > Windows 上**先把正在运行的服务停掉再构建**：服务端二进制与 `public/` 里的产物
 > 会被占用，`dx build` 写不进去，报的错是「另一个程序正在使用此文件」，
@@ -241,7 +252,8 @@ docker run -d --name nekotab \
   nekotab
 ```
 
-镜像是多阶段的：构建阶段装工具链并跑一次 `dx build --release --platform web`，
+镜像是多阶段的：构建阶段装工具链并跑一次带分包的
+`dx build --release --platform web @client --features wasm-split --wasm-split --debug-symbols=false`，
 运行阶段只留 `debian:bookworm-slim` + 产物。首次构建要下 Rust 镜像、`cargo install
 dioxus-cli` 并全量编译，是十几分钟量级；之后由 Docker 层缓存接管。
 

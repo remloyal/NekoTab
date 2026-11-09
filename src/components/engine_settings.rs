@@ -31,7 +31,7 @@ const ENGINE_PRESETS: [(&str, &str, &str, &str); 9] = [
 ];
 
 /// 搜索引擎设置（弹窗内容）：上方新增/编辑表单，下方已有引擎卡片列表。
-#[component]
+#[component(lazy)]
 pub fn EngineSettings(
     engines: Vec<Engine>,
     on_select: EventHandler<i64>,

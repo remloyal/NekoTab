@@ -14,7 +14,6 @@ mod favicon;
 mod lunar;
 mod models;
 mod pages;
-mod routes;
 // 时间的显示格式化：纯计算、无 UI。首屏大时钟与网格里的「数字时钟」组件共用，
 // 放 crate 根是为了不让卡片去依赖页面装饰（或反过来）。
 mod timefmt;
@@ -46,7 +45,7 @@ mod page_meta;
 #[cfg(feature = "server")]
 mod linkcheck;
 
-use routes::Route;
+use pages::Home;
 
 const MAIN_CSS: Asset = asset!("/assets/main.css");
 /// 默认站点图标；`site_logo` 为空时由 Home 用它。
@@ -59,7 +58,7 @@ fn App() -> Element {
 
         // 标题、描述、图标与主题色由 Home 按设置渲染（见 pages/home.rs）。
         // 这里只保留样式表，避免 head 里出现两套 meta。
-        Router::<Route> {}
+        Home {}
     }
 }
 

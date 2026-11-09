@@ -23,7 +23,7 @@ const TABS: [(AddTab, &str); 2] = [(AddTab::Bookmark, "网址导航"), (AddTab::
 /// 已经存在的组件在面板上标成"已添加"，点进去直接是它的设置表单。**不是**把它置灰：
 /// 置灰只会让人卡在"看到它、点不动、也不知道去哪改"上。服务端的去重仍然在（另一个
 /// 标签页/另一次会话里仍可能撞上），那道提示是兜底，不是常规路径。
-#[component]
+#[component(lazy)]
 pub fn AddCardDialog(
     /// 打开时停在哪个标签页
     initial_tab: AddTab,

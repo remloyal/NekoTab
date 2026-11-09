@@ -358,7 +358,8 @@ Netscape HTML 的导出于导入是对称的：分组写成文件夹（`<H3>` + 
 （`Dioxus.toml` 的 `pre_compress`，质量 11），`dioxus-server` 的
 `ServeFile::precompressed_br()` 直接把那份发出去、运行时零 CPU；`main.rs` 里
 再挂一层 gzip + brotli 负责动态响应（SSR 的 HTML、server function 的 JSON）。
-实测 wasm 1058 KB → gzip 423 KB → brotli 326 KB。
+实测首屏主包 1.63 MB → brotli 468 KB；设置面板等按需 chunk 另计
+（见 README 的「生产构建」）。
 
 ## 测试覆盖
 

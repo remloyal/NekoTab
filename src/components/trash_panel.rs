@@ -8,7 +8,7 @@ use crate::models::TrashItem;
 /// 删除书签走的是软删除（`deleted_at` 置时间戳），列表查询一直带
 /// `deleted_at IS NULL`，所以这里见到的是"删了但还在库里"的那些。
 /// 彻底删除才真的 `DELETE`。
-#[component]
+#[component(lazy)]
 pub fn TrashPanel(on_changed: EventHandler<()>) -> Element {
     let refresh = use_signal(|| 0u32);
     let mut busy = use_signal(|| false);

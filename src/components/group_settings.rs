@@ -13,7 +13,7 @@ const NAME_MAX: usize = 20;
 /// 表单同时承担"新增"和"编辑"：点某一行的 ✎ 会把该组载入表单，按钮变成
 /// 「保存修改」。这样图标选择器只需要写一份，用户也只需要认一套操作——
 /// 和参考站点那种「新增/编辑后统一提交」的做法一致。
-#[component]
+#[component(lazy)]
 pub fn GroupSettings(groups: Vec<Group>, on_changed: EventHandler<()>) -> Element {
     // 表单草稿
     let mut name = use_signal(String::new);

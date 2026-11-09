@@ -116,7 +116,7 @@ impl BackgroundSnapshot {
 /// 所有设置字段装在一个 `Settings` 草稿里（而不是一个字段一个 signal），加设置项
 /// 时只需要改 `models.rs` 的 `to_pairs` / `from_pairs` 和这里的控件。设置存的是
 /// 键值表，所以**加字段不需要数据库迁移**。
-#[component]
+#[component(lazy)]
 pub fn SettingsPanel(
     settings: Settings,
     groups: Vec<Group>,

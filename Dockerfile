@@ -57,7 +57,10 @@ RUN cargo install dioxus-cli --version 0.7.10 --locked
 WORKDIR /app
 COPY . .
 
-RUN dx build --release --platform web
+# 分包：--features wasm-split 打开懒加载，--wasm-split 产出 chunk，
+# --debug-symbols=false 让 wasm-opt 去掉调试信息（与 scripts/pack-linux.sh 保持一致）。
+RUN dx build --release --platform web \
+        @client --features wasm-split --wasm-split --debug-symbols=false
 
 # ---------- 运行阶段 ----------
 FROM debian:bookworm-slim

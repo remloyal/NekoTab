@@ -71,14 +71,20 @@ DX_OUT="$CARGO_TARGET_DIR/dx/nekotab/release/web"
 rm -rf "$DX_OUT"
 
 echo ">> 构建客户端（wasm，与架构无关）"
-dx build --release --platform web
+# 分包三件套缺一不可：
+#   --features wasm-split  让 #[component(lazy)] 真正走懒加载（默认不开，dx serve 不受影响）
+#   --wasm-split           让 dx 把标了 lazy 的组件拆成独立 .wasm chunk
+#   --debug-symbols=false  拆完后再让 wasm-opt 去掉调试信息（主包 br 528KB -> 469KB）
+dx build --release --platform web \
+    @client --features wasm-split --wasm-split --debug-symbols=false
 
 if [ ! -d "$DX_OUT/public" ]; then
     echo "!! 缺少客户端产物：$DX_OUT/public" >&2
     exit 1
 fi
 
-# 自检：产物里只应有本次构建引用的那一份 wasm，多出来就是上面的清理没生效
+# 自检：产物里只应有本次构建引用的那些 wasm（主包 1 份 + 每个 lazy 组件 1 份 chunk），
+# 多出来就是上面的清理没生效。
 echo "   -> public 资源合计 $(du -sh "$DX_OUT/public" | cut -f1)，wasm $(ls -1 "$DX_OUT/public/assets/"*.wasm 2>/dev/null | wc -l) 份"
 
 stage() {         # $1=服务端二进制路径  $2=输出目录

@@ -7,7 +7,9 @@ description = "极简自部署书签导航（Dioxus 0.7 fullstack）"
 license = "MIT"
 
 [dependencies]
-dioxus = { version = "0.7.10", features = ["fullstack", "router"] }
+# 只有首页一个页面、代码里也没有任何导航调用，因此不启用 dioxus-router：
+# 分包时路由宏会把每个路由整体拆成独立 chunk，单路由应用会白白多加载一次。
+dioxus = { version = "0.7.10", features = ["fullstack"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -76,6 +78,10 @@ web = [
     "dep:wasm-bindgen",
     "dep:web-sys",
 ]
+# 发布用的分包开关：只有开了它，`#[component(lazy)]` 才会真的走懒加载；
+# 同时必须给 dx 传 `--wasm-split`，否则没有 chunk 文件可加载。
+# 默认不开，`dx serve` 开发时仍是普通构建。
+wasm-split = ["dioxus/wasm-split"]
 server = [
     "dioxus/server",
     "dep:sqlx",

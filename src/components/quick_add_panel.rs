@@ -9,7 +9,7 @@ use crate::backend::get_api_token;
 ///
 /// 令牌和来源地址都只能在客户端拿到（SSR 不知道自己的对外域名，令牌也要等服务端
 /// 生成），所以首屏先渲染成"读取中"，挂载后再填。两边首次渲染都是空，不会 hydration 失配。
-#[component]
+#[component(lazy)]
 pub fn QuickAddPanel() -> Element {
     let mut token = use_signal(String::new);
     // 服务端分支里没有写入（下面那处只在 web 下编译），`mut` 只在 web 下需要
