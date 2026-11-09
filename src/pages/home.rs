@@ -260,6 +260,13 @@ pub fn Home() -> Element {
         Some(Ok(list)) => list,
         _ => Vec::new(),
     };
+    // 搜索框先摆上内置三家：真实列表要等一次请求，这期间左侧引擎位和回车都是空的。
+    // 只在「请求还没回来」时用占位；设置面板仍拿真实 `engines`，不能拿占位行去编辑/删除。
+    let search_engines = if engines_res.read().is_none() {
+        crate::engine::default_engines()
+    } else {
+        engines.clone()
+    };
 
     let loading = snapshot.is_none();
     let error: Option<String> = match &snapshot {
@@ -803,7 +810,7 @@ pub fn Home() -> Element {
                     // 留着会让人以为"书签都不见了"
                     query.set(String::new());
                 },
-                engines: engines.clone(),
+                engines: search_engines.clone(),
                 on_select_engine: move |id: i64| {
                     spawn(async move {
                         if set_active_engine(id).await.is_ok() {
