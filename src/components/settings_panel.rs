@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use super::background_panel::BackgroundPanel;
 use super::group_settings::GroupSettings;
+use super::lazy_boundary::LazyBoundary;
 use super::link_check_panel::LinkCheckPanel;
 use super::quick_add_panel::QuickAddPanel;
 use super::trash_panel::TrashPanel;
@@ -445,19 +446,21 @@ pub fn SettingsPanel(
                             }
                         }
 
-                        BackgroundPanel {
-                            pool: draft().background_urls.clone(),
-                            current: draft().background_url.clone(),
-                            rotating: draft().background_random,
-                            on_pool: move |urls: Vec<String>| {
-                                draft.with_mut(|s| s.background_urls = urls);
-                                saved.set(false);
-                            },
-                            on_pick: move |url: String| {
-                                draft.with_mut(|s| s.background_url = url);
-                                saved.set(false);
-                            },
-                            on_message: move |msg: Option<String>| wallpaper_msg.set(msg),
+                        LazyBoundary {
+                            BackgroundPanel {
+                                pool: draft().background_urls.clone(),
+                                current: draft().background_url.clone(),
+                                rotating: draft().background_random,
+                                on_pool: move |urls: Vec<String>| {
+                                    draft.with_mut(|s| s.background_urls = urls);
+                                    saved.set(false);
+                                },
+                                on_pick: move |url: String| {
+                                    draft.with_mut(|s| s.background_url = url);
+                                    saved.set(false);
+                                },
+                                on_message: move |msg: Option<String>| wallpaper_msg.set(msg),
+                            }
                         }
 
                         if let Some(msg) = wallpaper_msg() {
@@ -828,22 +831,28 @@ pub fn SettingsPanel(
 
                     // ---------- 快捷添加 ----------
                     Section::QuickAdd => rsx! {
-                        QuickAddPanel {}
+                        LazyBoundary { QuickAddPanel {} }
                     },
 
                     // ---------- 分组管理 ----------
                     Section::Groups => rsx! {
-                        GroupSettings { groups, on_changed: move |_| on_groups_changed.call(()) }
+                        LazyBoundary {
+                            GroupSettings { groups, on_changed: move |_| on_groups_changed.call(()) }
+                        }
                     },
 
                     // ---------- 链接检查 ----------
                     Section::Links => rsx! {
-                        LinkCheckPanel { on_changed: move |_| on_bookmarks_changed.call(()) }
+                        LazyBoundary {
+                            LinkCheckPanel { on_changed: move |_| on_bookmarks_changed.call(()) }
+                        }
                     },
 
                     // ---------- 回收站 ----------
                     Section::Trash => rsx! {
-                        TrashPanel { on_changed: move |_| on_bookmarks_changed.call(()) }
+                        LazyBoundary {
+                            TrashPanel { on_changed: move |_| on_bookmarks_changed.call(()) }
+                        }
                     },
                 }
 

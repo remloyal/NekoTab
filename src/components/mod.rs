@@ -11,6 +11,7 @@ mod group_settings;
 mod group_tabs;
 mod icon_picker;
 pub mod icons;
+mod lazy_boundary;
 mod link_check_panel;
 mod modal;
 mod pager;
@@ -35,6 +36,7 @@ pub use engine_settings::EngineSettings;
 pub use group_tabs::{
     build_tabs, group_value, parse_filter, Filter, GroupTabs, GROUP_UNGROUPED,
 };
+pub use lazy_boundary::LazyBoundary;
 pub use modal::Modal;
 pub use pager::Pager;
 pub use quote::QuoteLine;

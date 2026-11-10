@@ -8,9 +8,9 @@ use crate::backend::{
 };
 use crate::components::{
     build_tabs, group_value, parse_filter, AddCardDialog, AddTab, BatchMoveList, BookmarkForm,
-    CardGrid, Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs, Modal,
-    Pager, QuoteLine, SearchBar, SearchMode, SettingsPanel, Toast, WidgetForm, GROUP_UNGROUPED,
-    SEARCH_INPUT_ID,
+    CardGrid, Clock, ConfirmDialog, ContextMenu, Drawer, EngineSettings, Filter, GroupTabs,
+    LazyBoundary, Modal, Pager, QuoteLine, SearchBar, SearchMode, SettingsPanel, Toast, WidgetForm,
+    GROUP_UNGROUPED, SEARCH_INPUT_ID,
 };
 use crate::models::{widget_label, Bookmark, Group, Settings};
 use dioxus::html::geometry::WheelDelta;
@@ -1116,19 +1116,23 @@ pub fn Home() -> Element {
                     title: "主页设置",
                     wide: true,
                     on_close: move |_| drawer_open.set(false),
-                    SettingsPanel {
-                        settings: settings.clone(),
-                        groups: groups.clone(),
-                        on_settings_saved: move |_| {
-                            settings_refresh.set(settings_refresh() + 1);
-                            // 卡片尺寸之类的设置可能改了排序/分组展示，一起刷新
-                            groups_refresh.set(groups_refresh() + 1);
-                        },
-                        on_bookmarks_changed: move |_| refresh.set(refresh() + 1),
-                        on_groups_changed: move |_| {
-                            groups_refresh.set(groups_refresh() + 1);
-                            refresh.set(refresh() + 1);
-                        },
+                    // 懒加载组件必须就近包一层挂起边界，否则等 chunk 的那一下会把整个
+                    // 页面拆掉重建（见 components/lazy_boundary.rs）
+                    LazyBoundary {
+                        SettingsPanel {
+                            settings: settings.clone(),
+                            groups: groups.clone(),
+                            on_settings_saved: move |_| {
+                                settings_refresh.set(settings_refresh() + 1);
+                                // 卡片尺寸之类的设置可能改了排序/分组展示，一起刷新
+                                groups_refresh.set(groups_refresh() + 1);
+                            },
+                            on_bookmarks_changed: move |_| refresh.set(refresh() + 1),
+                            on_groups_changed: move |_| {
+                                groups_refresh.set(groups_refresh() + 1);
+                                refresh.set(refresh() + 1);
+                            },
+                        }
                     }
                 }
             }
@@ -1138,22 +1142,26 @@ pub fn Home() -> Element {
                     Modal {
                         title: "添加卡片",
                         on_close: move |_| modal.set(ModalState::None),
-                        AddCardDialog {
-                            initial_tab: tab,
-                            initial_kind: kind,
-                            groups: groups.clone(),
-                            // 当前就停在某个分组下时，默认归到那一组
-                            default_group: match filter {
-                                Filter::Group(id) => Some(id),
-                                _ => None,
-                            },
-                            existing_widgets: widgets.clone(),
-                            on_close: move |_| modal.set(ModalState::None),
-                            on_saved: move |_| {
-                                modal.set(ModalState::None);
-                                refresh.set(refresh() + 1);
-                                groups_refresh.set(groups_refresh() + 1);
-                            },
+                        // 下面几个都是懒加载组件：各自包一层局部挂起边界，
+                        // 等 chunk 时不要牵动整页（见 components/lazy_boundary.rs）
+                        LazyBoundary {
+                            AddCardDialog {
+                                initial_tab: tab,
+                                initial_kind: kind,
+                                groups: groups.clone(),
+                                // 当前就停在某个分组下时，默认归到那一组
+                                default_group: match filter {
+                                    Filter::Group(id) => Some(id),
+                                    _ => None,
+                                },
+                                existing_widgets: widgets.clone(),
+                                on_close: move |_| modal.set(ModalState::None),
+                                on_saved: move |_| {
+                                    modal.set(ModalState::None);
+                                    refresh.set(refresh() + 1);
+                                    groups_refresh.set(groups_refresh() + 1);
+                                },
+                            }
                         }
                     }
                 },
@@ -1207,23 +1215,25 @@ pub fn Home() -> Element {
                     Modal {
                         title: "搜索引擎设置",
                         on_close: move |_| modal.set(ModalState::None),
-                        EngineSettings {
-                            engines: engines.clone(),
-                            on_select: move |id: i64| {
-                                spawn(async move {
-                                    if set_active_engine(id).await.is_ok() {
-                                        engines_refresh.set(engines_refresh() + 1);
-                                    }
-                                });
-                            },
-                            on_delete: move |id: i64| {
-                                spawn(async move {
-                                    if delete_engine(id).await.is_ok() {
-                                        engines_refresh.set(engines_refresh() + 1);
-                                    }
-                                });
-                            },
-                            on_added: move |_| engines_refresh.set(engines_refresh() + 1),
+                        LazyBoundary {
+                            EngineSettings {
+                                engines: engines.clone(),
+                                on_select: move |id: i64| {
+                                    spawn(async move {
+                                        if set_active_engine(id).await.is_ok() {
+                                            engines_refresh.set(engines_refresh() + 1);
+                                        }
+                                    });
+                                },
+                                on_delete: move |id: i64| {
+                                    spawn(async move {
+                                        if delete_engine(id).await.is_ok() {
+                                            engines_refresh.set(engines_refresh() + 1);
+                                        }
+                                    });
+                                },
+                                on_added: move |_| engines_refresh.set(engines_refresh() + 1),
+                            }
                         }
                     }
                 },
