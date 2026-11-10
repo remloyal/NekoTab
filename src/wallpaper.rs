@@ -326,11 +326,22 @@ mod server {
             })
             .unwrap_or("application/octet-stream");
 
-        Response::builder()
+        // SVG 是一份文档，不是图片：直接访问 `/wallpaper/x.svg` 会让它在本站源
+        // 下执行脚本，于是就能拿用户的登录态调本站的 server function。
+        // `Content-Security-Policy: sandbox` 把它关进一个没有脚本、也没有独立
+        // 来源的沙箱里——当背景图用（`<img>` / CSS）完全不受影响。
+        let mut response = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type)
             // 文件名带随机成分、内容也不会变，可以长缓存
             .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+            // 别让浏览器猜类型：一个 SVG 被当成 HTML 渲染就是一条口子
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+        if content_type == "image/svg+xml" {
+            response = response.header(header::CONTENT_SECURITY_POLICY, "sandbox");
+        }
+
+        response
             .body(Body::from(data))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     }

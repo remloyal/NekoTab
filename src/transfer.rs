@@ -195,10 +195,14 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
     let mut folders: Vec<String> = Vec::new();
     let mut pending_folder: Option<String> = None;
     let mut collecting_desc = false;
-    let mut rest = html;
+    // 闭合标签的位置预扫一次（见 CloseTags 的说明：不然整篇是平方级的）
+    let close_tags = CloseTags::scan(html);
+    // 当前位置：已处理部分的末尾
+    let mut pos = 0usize;
 
-    while let Some(lt) = rest.find('<') {
-        let text = &rest[..lt];
+    while let Some(lt) = html[pos..].find('<') {
+        let lt = pos + lt;
+        let text = &html[pos..lt];
 
         // `<DD>` 之后的文字是上一条书签的描述
         if collecting_desc {
@@ -212,10 +216,11 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
             }
         }
 
-        let after = &rest[lt + 1..];
-        let Some(gt) = after.find('>') else { break };
-        let tag = &after[..gt];
-        rest = &after[gt + 1..];
+        let after = lt + 1;
+        let Some(gt_rel) = html[after..].find('>') else { break };
+        let gt = after + gt_rel;
+        let tag = &html[after..gt];
+        pos = gt + 1;
 
         let (closing, name) = split_tag(tag);
         collecting_desc = false;
@@ -228,9 +233,9 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
         }
 
         if name.eq_ignore_ascii_case("h3") {
-            if let Some((start, len)) = find_close_tag(rest, "h3") {
-                pending_folder = Some(decode_entities(&rest[..start]).trim().to_string());
-                rest = &rest[start + len..];
+            if let Some((start, len)) = CloseTags::next(&close_tags.h3, pos) {
+                pending_folder = Some(decode_entities(&html[pos..start]).trim().to_string());
+                pos = start + len;
             }
         } else if name.eq_ignore_ascii_case("a") {
             // href 也要解码实体：浏览器导出时属性值是 HTML 转义过的，
@@ -246,9 +251,9 @@ pub fn parse_netscape(html: &str) -> Vec<ImportedBookmark> {
                 .map(|value| value.trim().to_string())
                 .filter(|value| value.starts_with("data:image/"));
 
-            if let Some((start, len)) = find_close_tag(rest, "a") {
-                let title = decode_entities(&rest[..start]).trim().to_string();
-                rest = &rest[start + len..];
+            if let Some((start, len)) = CloseTags::next(&close_tags.a, pos) {
+                let title = decode_entities(&html[pos..start]).trim().to_string();
+                pos = start + len;
 
                 // 解析器只负责忠实提取；URL 是否可用由导入环节判定，
                 // 这样"跳过 N 条"的口径才和源文件对得上。
@@ -294,59 +299,99 @@ fn split_tag(tag: &str) -> (bool, String) {
     (closing, body[..end].to_string())
 }
 
-/// 找到 `</name>`，返回 (起始位置, 总长度)。
-fn find_close_tag(haystack: &str, name: &str) -> Option<(usize, usize)> {
-    let bytes = haystack.as_bytes();
-    let mut i = 0;
+/// 文档里所有 `</a>` 与 `</h3>` 的位置（起始下标 + 标签总长）。
+///
+/// 闭合标签的位置是**静态**的，所以预扫一次就够，之后每次查找都是二分。
+///
+/// 早先的写法是"每次用到时从当前位置往后扫一遍"，而扫描在找不到时会一路扫到
+/// 文末——于是一份满是畸形标签的文件会让整篇的查找次数变成 O(n²)：实测 800 KB
+/// 的导入文件要 22 秒，每翻一倍涨四倍，而且这段计算是同步的，会占死 tokio 的
+/// worker 线程。预扫之后整篇是线性的。
+struct CloseTags {
+    a: Vec<(usize, usize)>,
+    h3: Vec<(usize, usize)>,
+}
 
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'<' && bytes[i + 1] == b'/' {
-            let mut j = i + 2;
-            while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
-                j += 1;
+impl CloseTags {
+    fn scan(html: &str) -> Self {
+        let bytes = html.as_bytes();
+        let mut out = Self {
+            a: Vec::new(),
+            h3: Vec::new(),
+        };
+        let mut i = 0;
+
+        while i + 1 < bytes.len() {
+            if bytes[i] == b'<' && bytes[i + 1] == b'/' {
+                let mut j = i + 2;
+                while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
+                    j += 1;
+                }
+                let name = &html[i + 2..j];
+                let mut k = j;
+                while k < bytes.len() && bytes[k] != b'>' {
+                    k += 1;
+                }
+                if k >= bytes.len() {
+                    break;
+                }
+                if name.eq_ignore_ascii_case("a") {
+                    out.a.push((i, k + 1 - i));
+                } else if name.eq_ignore_ascii_case("h3") {
+                    out.h3.push((i, k + 1 - i));
+                }
+                i = k + 1;
+            } else {
+                i += 1;
             }
-            let found = &haystack[i + 2..j];
-            let mut k = j;
-            while k < bytes.len() && bytes[k] != b'>' {
-                k += 1;
-            }
-            if k >= bytes.len() {
-                return None;
-            }
-            if found.eq_ignore_ascii_case(name) {
-                return Some((i, k + 1 - i));
-            }
-            i = k + 1;
-        } else {
-            i += 1;
         }
+
+        out
     }
 
-    None
+    /// 下一个起始位置不小于 `pos` 的闭合标签。
+    fn next(tags: &[(usize, usize)], pos: usize) -> Option<(usize, usize)> {
+        let index = tags.partition_point(|&(start, _)| start < pos);
+        tags.get(index).copied()
+    }
 }
 
 /// 取属性值，支持单/双引号与无引号三种写法，属性名大小写不敏感。
+///
+/// 属性名要**独立成属性**才算数：`data-href="…"` 里的 `href=` 不是 `href`。
+/// （早先只是 `find("href=")`，于是 `data-href=` 会被认成 `href=`。）
 ///
 /// 也让 favicon 模块复用来解析 `<link rel="icon" href="...">`。
 pub(crate) fn attr_value(tag: &str, name: &str) -> Option<String> {
     // to_ascii_lowercase 只动 ASCII，字节长度不变，因此偏移量可直接沿用
     let lower = tag.to_ascii_lowercase();
     let key = format!("{}=", name.to_ascii_lowercase());
-    let pos = lower.find(&key)?;
+    let bytes = lower.as_bytes();
 
-    let rest = tag[pos + key.len()..].trim_start();
-    let quote = rest.chars().next()?;
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find(&key) {
+        let pos = from + rel;
+        let boundary = pos == 0
+            || !matches!(bytes[pos - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_');
 
-    if quote == '"' || quote == '\'' {
-        let body = &rest[1..];
-        let end = body.find(quote)?;
-        Some(body[..end].to_string())
-    } else {
-        let end = rest
-            .find(char::is_whitespace)
-            .unwrap_or(rest.len());
-        Some(rest[..end].to_string())
+        if boundary {
+            let rest = tag[pos + key.len()..].trim_start();
+            let quote = rest.chars().next()?;
+
+            if quote == '"' || quote == '\'' {
+                let body = &rest[1..];
+                let end = body.find(quote)?;
+                return Some(body[..end].to_string());
+            }
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            return Some(rest[..end].to_string());
+        }
+
+        // 不是独立的属性名，继续往后找
+        from = pos + key.len();
     }
+
+    None
 }
 
 fn is_web_url(url: &str) -> bool {
@@ -359,31 +404,60 @@ pub fn is_usable_url(url: &str) -> bool {
     is_web_url(url)
 }
 
+/// 实体名的最长长度（含 `#`/`x` 前缀与分号）再多留一点余量。
+///
+/// 用来给"往后找 `;`"划一个窗口：实体名最长也就十来个字符，看这么远足够了。
+const ENTITY_WINDOW: usize = 16;
+
 /// 解码 HTML 实体：常见命名实体 + 十进制 / 十六进制数字实体。
+///
+/// **单趟扫描。** 早先的写法是"每遇到一个 `&` 就往后找一遍 `;`"，输入里全是
+/// `&` 时那就成了平方级——实测 40 万个 `&` 要 3 秒，而这份输入可能来自任意
+/// 第三方网页（抓标题时它在 `page_meta` 里也用），也可能是用户随手导入的
+/// 一个畸形 HTML 文件。现在每个 `&` 后面只看固定的一小段，整篇是线性的。
 pub(crate) fn decode_entities(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    let mut rest = input;
+    let bytes = input.as_bytes();
+    let mut i = 0;
 
-    while let Some(pos) = rest.find('&') {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos + 1..];
-
-        match after.find(';').and_then(|semi| {
-            decode_one(&after[..semi]).map(|ch| (ch, semi))
-        }) {
-            Some((ch, semi)) => {
-                out.push(ch);
-                rest = &after[semi + 1..];
+    while i < bytes.len() {
+        if bytes[i] != b'&' {
+            // 普通字符：整段拷到下一个 `&` 为止。
+            // 按字节找 `&` 是安全的——UTF-8 的续字节都 ≥ 0x80，不会撞上 0x26。
+            let start = i;
+            while i < bytes.len() && bytes[i] != b'&' {
+                i += 1;
             }
+            out.push_str(&input[start..i]);
+            continue;
+        }
+
+        // `&` 后面最多看 ENTITY_WINDOW 个字节找 `;`
+        let limit = (i + 1 + ENTITY_WINDOW).min(bytes.len());
+        let semi = bytes[i + 1..limit]
+            .iter()
+            .position(|&byte| byte == b';')
+            .map(|offset| i + 1 + offset);
+
+        match semi {
+            Some(semi) => match decode_one(&input[i + 1..semi]) {
+                Some(ch) => {
+                    out.push(ch);
+                    i = semi + 1;
+                }
+                None => {
+                    // 不是可识别实体，原样保留 `&`
+                    out.push('&');
+                    i += 1;
+                }
+            },
             None => {
-                // 不是可识别实体，原样保留 `&`
                 out.push('&');
-                rest = after;
+                i += 1;
             }
         }
     }
 
-    out.push_str(rest);
     out
 }
 
@@ -672,5 +746,58 @@ mod tests {
         assert_eq!(attr_value("a href='https://b.com'", "HREF").as_deref(), Some("https://b.com"));
         assert_eq!(attr_value("A HREF=https://c.com X=1", "href").as_deref(), Some("https://c.com"));
         assert_eq!(attr_value("A TITLE=\"x\"", "href"), None);
+    }
+
+    /// 属性名得独立成属性：`data-href=` 不是 `href=`。
+    #[test]
+    fn attr_value_ignores_similar_attribute_names() {
+        assert_eq!(attr_value("A data-href=\"https://evil/\"", "href"), None);
+        assert_eq!(attr_value("A xhref=\"https://evil/\"", "href"), None);
+        // 真的 href 照样认出来
+        assert_eq!(
+            attr_value("A data-href=\"https://a/\" href=\"https://b/\"", "href").as_deref(),
+            Some("https://b/")
+        );
+    }
+
+    /// 病态输入（大量没有闭合标签的 `<A>`）不该把解析拖成平方级。
+    ///
+    /// 早先的写法是"每次找一个 `</a>` 就从当前位置扫到文末"，找不到就白扫一遍，
+    /// 于是整篇是 O(n²)：实测 800 KB 的输入要 22 秒。这里给一个宽松的时间上限
+    /// 兜住回归——线性的话这个量级是毫秒级的。
+    #[test]
+    fn malformed_input_parses_in_linear_time() {
+        let mut html = String::new();
+        for _ in 0..20_000 {
+            html.push_str("<A HREF=\"http://example.com/\">");
+        }
+
+        let started = std::time::Instant::now();
+        let items = parse_netscape(&html);
+        let elapsed = started.elapsed();
+
+        // 没有闭合的 `<A>` 拿不到标题，也就不是一条书签
+        assert!(items.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "解析 {} 字节用了 {elapsed:?}，像是又变回平方级了",
+            html.len()
+        );
+    }
+
+    /// 实体解码同样不能是平方级（输入可能来自任意第三方网页）。
+    #[test]
+    fn entity_decoding_is_linear() {
+        let text = "&".repeat(200_000);
+        let started = std::time::Instant::now();
+        let decoded = decode_entities(&text);
+        let elapsed = started.elapsed();
+
+        assert_eq!(decoded.len(), text.len(), "认不出来的 & 原样保留");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "解码 {} 个 & 用了 {elapsed:?}，像是又变回平方级了",
+            text.len()
+        );
     }
 }

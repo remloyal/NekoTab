@@ -105,14 +105,14 @@ fn parse_json(body: &str) -> Result<Value, String> {
 /// 地址只留 http(s)：`open_url` 会把地址交给 `window.open`，上游若返回
 /// `javascript:` 之类的地址，这里就是最后一道闸。
 fn finish(mut items: Vec<HotItem>) -> Vec<HotItem> {
-    let mut seen: Vec<String> = Vec::new();
+    // 用 HashSet 去重：早先拿 Vec 线性找，榜单长了就是平方级
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     items.retain(|item| {
         let title = item.title.trim();
         let url_ok = item.url.starts_with("http://") || item.url.starts_with("https://");
-        if title.is_empty() || !url_ok || seen.iter().any(|s| s == title) {
+        if title.is_empty() || !url_ok || !seen.insert(title.to_string()) {
             false
         } else {
-            seen.push(title.to_string());
             true
         }
     });

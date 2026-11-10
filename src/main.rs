@@ -44,6 +44,9 @@ mod page_meta;
 // 死链检测：并发探测书签地址还通不通（只在服务端发请求）
 #[cfg(feature = "server")]
 mod linkcheck;
+// 出站请求的"能不能去"判定：挡住第三方站点把服务端引到内网的 SSRF
+#[cfg(feature = "server")]
+mod netguard;
 
 use pages::Home;
 
@@ -126,6 +129,24 @@ async fn export_database() -> impl dioxus::server::axum::response::IntoResponse 
     }
 }
 
+/// 静态产物与页面之外的路径一律 404。
+///
+/// Dioxus 的 SSR 兜底路由会把**任何**没被路由命中的路径渲染成整页，而整页里
+/// 带着全部书签的数据（标题、网址、描述，连记事本组件的正文都在里面）。于是
+/// 任何"看着像公开路径、其实没有对应文件"的地址——`/favicon.ico`（浏览器每个
+/// 页面都会自动去请求它）、`/manifest.json`、`/_dioxus`——都会变成一条不用
+/// 登录就能拿走整个书签库的通道。
+///
+/// 这条 catch-all 把兜底收紧：只有 `/`（首页）才走 SSR 兜底，其余路径落到这里
+/// 返回 404。静态产物是更具体的路由（release 下逐文件注册、debug 下按目录
+/// 嵌套），axum 按特异度匹配，所以真实存在的资源仍走静态产物、不被它盖住。
+#[cfg(feature = "server")]
+async fn not_found() -> impl dioxus::server::axum::response::IntoResponse {
+    use dioxus::server::axum::http::StatusCode;
+
+    (StatusCode::NOT_FOUND, "404 Not Found").into_response()
+}
+
 fn main() {
     // 服务端：先初始化数据库连接池，再把 axum router 交给 dioxus 启动。
     #[cfg(feature = "server")]
@@ -195,6 +216,9 @@ fn main() {
                     dioxus::server::axum::routing::get(auth::login_page).post(auth::login_submit),
                 )
                 .route("/logout", dioxus::server::axum::routing::get(auth::logout))
+                // 除首页与静态产物外，其余路径一律 404，不落到 SSR 兜底上
+                // （兜底渲染出来的是带着全部书签数据的整页，见 not_found 的说明）。
+                .route("/{*path}", dioxus::server::axum::routing::get(not_found))
                 // 响应压缩，gzip 与 brotli 都开。
                 //
                 // 静态产物（wasm / js / css）已在构建期压成 .br（见 Dioxus.toml 的

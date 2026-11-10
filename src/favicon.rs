@@ -425,8 +425,11 @@ pub(crate) mod server {
         scheme: &str,
         steps: &mut Vec<String>,
     ) -> Option<(String, Vec<u8>)> {
+        // 用户收藏的那个地址：与它完全同一个端点的目标一律放行（内网站点也走
+        // 这条路），其余目标必须解析到公网——见 netguard 的说明。
+        let origin = crate::netguard::Endpoint::of(&format!("{scheme}://{host}/"));
         let ico = format!("{scheme}://{host}/favicon.ico");
-        match fetch_image(&ico).await {
+        match fetch_image(&ico, origin.as_ref()).await {
             Ok(found) => return Some(found),
             Err(why) => steps.push(format!("favicon.ico: {why}")),
         }
@@ -452,7 +455,7 @@ pub(crate) mod server {
                             }
                             return Some((content_type, data));
                         }
-                        Some(IconRef::Url(url)) => match fetch_image(&url).await {
+                        Some(IconRef::Url(url)) => match fetch_image(&url, origin.as_ref()).await {
                             Ok(found) => return Some(found),
                             Err(why) => steps.push(format!("{url}: {why}")),
                         },
@@ -465,7 +468,7 @@ pub(crate) mod server {
 
         // 约定路径兜底：不少站点只放 apple-touch-icon.png 而不在 head 里声明
         let apple = format!("{scheme}://{host}/apple-touch-icon.png");
-        match fetch_image(&apple).await {
+        match fetch_image(&apple, origin.as_ref()).await {
             Ok(found) => Some(found),
             Err(why) => {
                 steps.push(format!("apple-touch-icon.png: {why}"));
@@ -475,7 +478,17 @@ pub(crate) mod server {
     }
 
     /// 抓一个 URL，只有确认是图片才返回；失败时给出可读原因。
-    async fn fetch_image(url: &str) -> Result<(String, Vec<u8>), String> {
+    ///
+    /// `origin` 是"用户自己指定的那个地址"：目标与它同一个端点就放行，其余
+    /// 目标必须解析到公网。页面里声明的图标地址是**对方站点给的**，不加这道
+    /// 闸的话，它能把服务端的请求引到内网去（实测能把 `127.0.0.1` 上另一个
+    /// 端口的内容原样读回来）。
+    async fn fetch_image(
+        url: &str,
+        origin: Option<&crate::netguard::Endpoint>,
+    ) -> Result<(String, Vec<u8>), String> {
+        crate::netguard::ensure_allowed(url, origin).await?;
+
         let response = backend::http_client()
             .get(url)
             .header(reqwest::header::USER_AGENT, USER_AGENT)
@@ -746,6 +759,8 @@ pub(crate) mod server {
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type)
             .header(header::CACHE_CONTROL, "public, max-age=604800")
+            // 别让浏览器自己猜类型
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
             .body(Body::from(data))
             .unwrap_or_else(|_| not_found())
     }
@@ -755,7 +770,12 @@ pub(crate) mod server {
             .status(StatusCode::NOT_FOUND)
             .header(header::CACHE_CONTROL, "public, max-age=3600")
             .body(Body::empty())
-            .expect("构造 404 响应")
+            // 构造一个空响应不会失败；真失败了也只能返回 500，不能 panic
+            // （release 是 panic = "abort"，一次 panic 会带走整个进程）
+            .unwrap_or_else(|_| {
+                use dioxus::server::axum::response::IntoResponse;
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            })
     }
 }
 

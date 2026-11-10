@@ -778,7 +778,9 @@ pub fn is_allowed_background(url: &str) -> bool {
     url.is_empty()
         || url.starts_with("http://")
         || url.starts_with("https://")
-        || url.starts_with('/')
+        // 本站路径（`/wallpaper/x.png` 这类）。`//` 开头的不行：那是协议相对地址，
+        // 浏览器会当成 `https://evil.com` 去取，而不是本站。
+        || (url.starts_with('/') && !url.starts_with("//"))
 }
 
 /// 把一串候选地址收敛成可信的背景池：逐行 trim、丢空行、丢非法行与超长行、
@@ -1469,6 +1471,17 @@ mod tests {
 
         let long = format!("https://a.test/{}", "x".repeat(BACKGROUND_URL_MAX));
         assert!(normalize_pool([long.as_str()]).is_empty(), "超长地址不收");
+    }
+
+    /// `//evil.com` 是协议相对地址，浏览器会当成 `https://evil.com` 去取，
+    /// 不是本站路径——不能放进池里。
+    #[test]
+    fn protocol_relative_urls_are_not_local_paths() {
+        assert!(is_allowed_background("/wallpaper/deadbeef.png"));
+        assert!(is_allowed_background("https://a.test/x.jpg"));
+        assert!(!is_allowed_background("//evil.com/x.png"));
+        assert!(!is_allowed_background("  //evil.com/x.png  "));
+        assert!(normalize_pool(["//evil.com/x.png"]).is_empty());
     }
 
     #[test]

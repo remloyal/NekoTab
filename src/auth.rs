@@ -14,6 +14,7 @@
 //!   发起请求时没有这里的会话 Cookie。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,6 +35,15 @@ const LOCK_FOR: Duration = Duration::from_secs(60);
 struct Config {
     password: String,
     key: ring::hmac::Key,
+    /// 会话版本号。登出时 +1，之前签发的 Cookie 全部作废。
+    ///
+    /// 签名里带着它，于是"这个会话是不是登出之前签的"这件事能验出来——
+    /// 只清浏览器 Cookie 是不够的：Cookie 是无状态的，复制走的那一份在 30 天
+    /// 内照样能用，复制来的会话没法靠清 Cookie 止损。
+    ///
+    /// 单用户部署里"退出登录"就意味着"所有设备上的会话一起作废"，不做
+    /// 多设备会话表——多设备各自登出反而是书签页自己会遇到的常态。
+    version: AtomicU64,
 }
 
 static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
@@ -67,6 +77,9 @@ pub async fn init_from_env() {
         .ok()
         .filter(|value| !value.trim().is_empty());
 
+    // 会话版本号：登出时 +1，之前签发的 Cookie 全部作废。
+    let version = persisted_session_version().await;
+
     let (key, source) = match env_secret {
         Some(secret) => (
             ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes()),
@@ -84,29 +97,86 @@ pub async fn init_from_env() {
                 )
             }
             None => {
+                // 取不到随机持久密钥，就只剩"用访问密码本身当 HMAC key"这一条路，
+                // 而那正好把"拿到 Cookie 的人无法离线枚举密码"这条保证弄没了：
+                // 拿到一个 Cookie 就能对候选密码逐个离线验签。
+                // 与其悄悄降级，不如拒绝启动——部署的人显式设一个 SESSION_SECRET
+                // 就行，总比上线一个能被离线爆破的密码保护强。
                 eprintln!(
-                    "[NekoTab] 生成会话密钥失败，退回用访问密码派生；建议设置 SESSION_SECRET"
+                    "[NekoTab] 无法读取或生成持久会话密钥，拒绝启动。\n\
+                     [NekoTab]   请设置 SESSION_SECRET（一串随机字符）后重试；\n\
+                     [NekoTab]   也可以暂时清空 ACCESS_PASSWORD 关掉整站密码。"
                 );
-                (
-                    ring::hmac::Key::new(ring::hmac::HMAC_SHA256, password.as_bytes()),
-                    "访问密码",
-                )
+                std::process::exit(1);
             }
         },
     };
 
-    if CONFIG.set(Some(Config { password, key })).is_err() {
+    if CONFIG
+        .set(Some(Config {
+            password,
+            key,
+            version: AtomicU64::new(version),
+        }))
+        .is_err()
+    {
         eprintln!("[NekoTab] 访问密码配置已初始化过，忽略本次环境变量");
         return;
     }
     println!("[NekoTab] 访问密码已启用（登录状态保持 30 天，密钥来源：{source}）");
 }
 
+/// 从 `settings` 表取会话版本号；没有就是 0。
+///
+/// 存进库是为了重启后仍然认得"这个会话是登出前签的"——只放在内存里的话，
+/// 重启一次就把所有旧 Cookie 放回来了。
+async fn persisted_session_version() -> u64 {
+    let pool = crate::db::pool();
+
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'session_version'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    if let Some(value) = existing.as_deref().and_then(|v| v.trim().parse::<u64>().ok()) {
+        return value;
+    }
+
+    let _ = sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES ('session_version', '0')")
+        .execute(pool)
+        .await;
+
+    sqlx::query_scalar("SELECT value FROM settings WHERE key = 'session_version'")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value: String| value.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 /// 从 `settings` 表取会话密钥；没有就生成 32 字节随机数存进去。
 ///
 /// 用 SQLite 的 `randomblob` 而不是再引一个随机数 crate。`INSERT OR IGNORE`
 /// 兜住并发启动：两个进程同时生成时，后写的那个会被忽略，再读一次拿到先写的。
+///
+/// 读不到就返回 `None`，由调用方拒绝启动。这里重试几次：刚启动时数据库文件
+/// 可能正被另一个进程占着，一次读失败就拒绝启动太脆了。
 async fn persisted_session_secret() -> Option<String> {
+    for attempt in 0..3 {
+        match load_or_create_session_secret().await {
+            Some(secret) => return Some(secret),
+            None if attempt < 2 => {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+async fn load_or_create_session_secret() -> Option<String> {
     let pool = crate::db::pool();
 
     let existing: Option<String> =
@@ -177,27 +247,64 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// 被签名的内容：会话版本 + 过期时间。
+///
+/// 版本进签名，于是"这个会话是不是登出之前签的"这件事能被验出来。
+fn token_payload(version: u64, expiry: u64) -> String {
+    format!("{version}.{expiry}")
+}
+
 fn make_token(cfg: &Config) -> String {
+    let version = cfg.version.load(Ordering::Relaxed);
     let expiry = now_secs() + SESSION_SECS;
-    let signature = ring::hmac::sign(&cfg.key, expiry.to_string().as_bytes());
-    format!("{expiry}.{}", hex(signature.as_ref()))
+    let signature = ring::hmac::sign(&cfg.key, token_payload(version, expiry).as_bytes());
+    format!("{version}.{expiry}.{}", hex(signature.as_ref()))
 }
 
 fn token_ok(cfg: &Config, token: &str) -> bool {
-    let Some((expiry, signature)) = token.split_once('.') else {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    let Some(version) = parts[0].parse::<u64>().ok() else {
         return false;
     };
-    let Ok(expiry) = expiry.parse::<u64>() else {
+    let Some(expiry) = parts[1].parse::<u64>().ok() else {
         return false;
     };
+    let signature = parts[2];
+    // 登出后版本号变了 → 之前签的会话一律作废
+    if version != cfg.version.load(Ordering::Relaxed) {
+        return false;
+    }
     if expiry < now_secs() {
         return false;
     }
     let Some(signature) = unhex(signature) else {
         return false;
     };
-    let expected = ring::hmac::sign(&cfg.key, expiry.to_string().as_bytes());
+    let expected = ring::hmac::sign(&cfg.key, token_payload(version, expiry).as_bytes());
     constant_eq(expected.as_ref(), &signature)
+}
+
+/// 登出：会话版本 +1，之前签发的 Cookie 全部作废。
+///
+/// 内存里的版本号总是先加（哪怕写库失败也加）：宁可"这一次进程里旧会话立刻
+/// 失效"，也不要"登出看起来成功了、旧 Cookie 却还能用"。写库失败只影响重启
+/// 之后——那种情况下会打一行日志提示。
+async fn bump_session_version(cfg: &Config) {
+    let next = cfg.version.fetch_add(1, Ordering::SeqCst) + 1;
+    let pool = crate::db::pool();
+    let result = sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('session_version', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(next.to_string())
+    .execute(pool)
+    .await;
+    if result.is_err() {
+        eprintln!("[NekoTab] 会话版本写库失败，重启后旧登录状态可能恢复");
+    }
 }
 
 /// 常量时间比较（长度不同直接返回 false——长度本身不是秘密）。
@@ -241,7 +348,42 @@ fn under(path: &str, prefix: &str) -> bool {
     path == prefix || path.starts_with(&format!("{prefix}/"))
 }
 
+/// 把请求路径规整成逐段的形式：折叠重复斜杠、去掉 `.`、解掉 `..`。
+///
+/// 守卫按路径判定"要不要鉴权"，所以判定用的路径必须和路由匹配时看到的是同一个
+/// 东西。否则 `/assets/../api/xxx` 会被当成"静态产物前缀下的公开路径"放行，
+/// 而路由那边解完 `..` 命中的却是需要鉴权的接口。
+///
+/// 越界的 `..`（如 `/../etc/passwd`）解到根就停住，不会跑到根之外去。
+fn normalize_path(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    }
+}
+
 /// 这些路径不经过密码：登录页本身、静态产物、书签小工具接口。
+///
+/// 前提是**落到这里的路径只可能被静态路由接住**。Dioxus 的 SSR 兜底会把任何
+/// 没被路由命中的路径渲染成整页，而整页里带着全部书签的数据——所以一个"其实
+/// 没有对应文件"的前缀一旦被放行，就等于把整页送出去（`/favicon.ico` 就曾经
+/// 是这样的一个洞：它不在 public 目录里，于是落到 SSR 兜底上，浏览器每个
+/// 页面都会自动去请求它）。
+///
+/// main.rs 里那条 `/{*path}` 的 404 兜底就是为此存在的：前缀下的文件不存在时
+/// 落到它上面（404），而不是落到 SSR 兜底上（整页）。守卫这一层因此只管
+/// "要不要鉴权"，不管"有没有这个文件"。
 fn is_public(path: &str) -> bool {
     path == "/login"
         || path == "/logout"
@@ -251,10 +393,7 @@ fn is_public(path: &str) -> bool {
         || path == "/manifest.json"
         || path == "/manifest.webmanifest"
         || under(path, "/assets")
-        || under(path, "/dist")
         || under(path, "/wasm")
-        || under(path, "/_dioxus")
-        || under(path, "/__dx")
         || path == "/api/bookmark"
 }
 
@@ -444,39 +583,40 @@ button:active{transform:translateY(1px)}
 </form>
 </body></html>"#;
 
-fn failure_locked() -> bool {
+/// 记一次失败，返回"这次尝试是否应该被挡下"。
+///
+/// 检查与计数在**同一个临界区**里做完：分成"先查后记"两次加锁的话，两次之间
+/// 留着窗口，那个窗口里并发的请求会各自看到"还没锁"，限流就能被并发绕过。
+///
+/// 锁中毒（某个线程持锁时 panic 了）不当成"没有锁"——那会让一次 panic 把限流
+/// 永久废掉。取回中毒的锁继续用：计数器的数据可能不完整，但限流本身还在。
+fn register_failure() -> bool {
     let guard = FAILURES.get_or_init(|| Mutex::new(Failures::default()));
-    match guard.lock() {
-        Ok(mut state) => {
-            if let Some(until) = state.locked_until {
-                if Instant::now() < until {
-                    return true;
-                }
-                state.locked_until = None;
-                state.count = 0;
-            }
-            false
-        }
-        Err(_) => false,
-    }
-}
+    let mut state = guard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = Instant::now();
 
-fn record_failure() {
-    let guard = FAILURES.get_or_init(|| Mutex::new(Failures::default()));
-    if let Ok(mut state) = guard.lock() {
-        state.count += 1;
-        if state.count >= MAX_FAILS {
-            state.locked_until = Some(Instant::now() + LOCK_FOR);
+    if let Some(until) = state.locked_until {
+        if now < until {
+            return true;
         }
+        // 锁过期，重新计数
+        state.locked_until = None;
+        state.count = 0;
     }
+
+    state.count += 1;
+    if state.count >= MAX_FAILS {
+        state.locked_until = Some(now + LOCK_FOR);
+        return true;
+    }
+    false
 }
 
 fn reset_failures() {
     let guard = FAILURES.get_or_init(|| Mutex::new(Failures::default()));
-    if let Ok(mut state) = guard.lock() {
-        state.count = 0;
-        state.locked_until = None;
-    }
+    let mut state = guard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.count = 0;
+    state.locked_until = None;
 }
 
 /// `GET /login`。
@@ -528,15 +668,10 @@ pub async fn login_submit(request: Request) -> Response {
     if !matches {
         // 锁只拦"继续猜错"，不拦正确密码：否则匿名者连发 8 次错误就能
         // 把站长也锁在门外（全局计数器的 DoS）。
-        if failure_locked() {
-            return redirect(&format!(
-                "/login?error=2&next={}",
-                crate::engine::encode_query(&next)
-            ));
-        }
-        record_failure();
+        let locked = register_failure();
+        let error = if locked { 2 } else { 1 };
         return redirect(&format!(
-            "/login?error=1&next={}",
+            "/login?error={error}&next={}",
             crate::engine::encode_query(&next)
         ));
     }
@@ -551,10 +686,17 @@ pub async fn login_submit(request: Request) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// `GET /logout`：清 Cookie 回登录页。没启用密码时直接回首页。
+/// `GET /logout`：作废当前会话并清 Cookie，回登录页。没启用密码时直接回首页。
+///
+/// 只清 Cookie 是不够的：Cookie 是无状态的签名串，复制走的那一份在 30 天内
+/// 照样能用，"退出登录"对它不起作用。所以这里把**会话版本 +1**——版本进了
+/// 签名，之前签发的会话（不管在哪个设备上）全部作废。
 pub async fn logout(request: Request) -> Response {
     let secure = is_https(request.headers());
     let target = if config().is_some() { "/login" } else { "/" };
+    if let Some(cfg) = config() {
+        bump_session_version(cfg).await;
+    }
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, target)
@@ -569,7 +711,10 @@ pub async fn guard(request: Request, next: Next) -> Response {
         return next.run(request).await;
     };
 
-    let path = request.uri().path().to_string();
+    // 判定必须用在规整过的路径上：否则 `/assets/../api/xxx` 会被当成
+    // "静态产物前缀下的公开路径"放行，而路由那边解完 `..` 命中的却是
+    // 需要鉴权的接口。
+    let path = normalize_path(request.uri().path());
 
     if is_public(&path) || authenticated(cfg, request.headers()) {
         return next.run(request).await;
@@ -600,6 +745,7 @@ mod tests {
         let cfg = Config {
             password: "pw".to_string(),
             key,
+            version: AtomicU64::new(0),
         };
         let token = make_token(&cfg);
         assert!(token_ok(&cfg, &token));
@@ -607,6 +753,36 @@ mod tests {
         let mut broken = token.clone();
         broken.pop();
         assert!(!token_ok(&cfg, &broken));
+    }
+
+    #[test]
+    fn logout_invalidates_issued_tokens() {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"secret");
+        let cfg = Config {
+            password: "pw".to_string(),
+            key,
+            version: AtomicU64::new(3),
+        };
+        let token = make_token(&cfg);
+        assert!(token_ok(&cfg, &token));
+        // 登出：版本 +1 之后，之前签发的会话一律作废
+        cfg.version.fetch_add(1, Ordering::SeqCst);
+        assert!(!token_ok(&cfg, &token), "登出前的 Cookie 必须失效");
+        // 但新签发的还能用
+        let fresh = make_token(&cfg);
+        assert!(token_ok(&cfg, &fresh));
+    }
+
+    #[test]
+    fn paths_are_normalized_before_the_public_check() {
+        // 静态产物前缀 + `..` 不能被当成公开路径放行
+        assert_eq!(normalize_path("/assets/../api/x"), "/api/x");
+        assert_eq!(normalize_path("/assets//main.css"), "/assets/main.css");
+        assert_eq!(normalize_path("/./assets/main.css"), "/assets/main.css");
+        assert_eq!(normalize_path("/"), "/");
+        assert_eq!(normalize_path("/../.."), "/");
+        assert!(!is_public(&normalize_path("/assets/../api/x")));
+        assert!(is_public(&normalize_path("/assets/main.css")));
     }
 
     #[test]

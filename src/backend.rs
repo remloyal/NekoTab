@@ -551,22 +551,43 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
 ///
 /// 前端传的是**全量**顺序（列表始终取全量），因此能整体覆盖。分页只影响显示，
 /// 拖拽仍然作用在全量顺序上。
+///
+/// id 列表要校验：不重复、且都得是库里的书签。不校验的话，重复的 id 会写出
+/// 相同的 `sort_order`，而列表是按 `(sort_order, id)` 排的——于是顺序会退化成
+/// 隐式的 id 序，看起来像是"排序乱了"。
 #[server]
 pub async fn reorder_bookmarks(ids: Vec<i64>) -> Result<(), ServerFnError> {
     use crate::db;
+
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    for id in &ids {
+        if !seen.insert(*id) {
+            return Err(ServerFnError::new("排序列表里有重复的卡片"));
+        }
+    }
 
     let mut tx = db::pool()
         .begin()
         .await
         .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
 
+    // 只给确实存在的卡片写排序位：传一个不存在的 id 进来不该悄悄改掉别人的
+    let mut unknown = Vec::new();
     for (index, id) in ids.iter().enumerate() {
-        sqlx::query("UPDATE bookmarks SET sort_order = ? WHERE id = ?")
+        let affected = sqlx::query("UPDATE bookmarks SET sort_order = ? WHERE id = ?")
             .bind(index as i64)
             .bind(id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| ServerFnError::new(format!("更新排序失败: {e}")))?;
+            .map_err(|e| ServerFnError::new(format!("更新排序失败: {e}")))?
+            .rows_affected();
+        if affected == 0 {
+            unknown.push(*id);
+        }
+    }
+    if !unknown.is_empty() {
+        let _ = tx.rollback().await;
+        return Err(ServerFnError::new("排序列表里有不存在的卡片"));
     }
 
     tx.commit()
@@ -1221,6 +1242,15 @@ pub async fn regenerate_api_token() -> Result<String, ServerFnError> {
 // 导入 / 导出
 // ---------------------------------------------------------------------------
 
+/// 导入文本的大小上限。
+///
+/// 解析本身已经是线性的（见 `transfer::CloseTags` 与 `decode_entities` 的说明），
+/// 但这份输入可以是**任意来源**的：一份几十 MB 的畸形 HTML 仍然能让人占住
+/// 几秒 CPU 与一大块内存。浏览器自己导出的书签文件通常在几百 KB 以内，
+/// 所以 8 MB 足够宽裕，同时把最坏情况钉住。
+#[cfg(feature = "server")]
+const MAX_IMPORT_BYTES: usize = 8 * 1024 * 1024;
+
 /// 批量导入。自动识别浏览器导出的书签 HTML 与本应用的 JSON 备份。
 ///
 /// 按 URL 去重（含库内已有的）；新记录追加在现有排序之后，并保持文件内顺序。
@@ -1229,6 +1259,14 @@ pub async fn regenerate_api_token() -> Result<String, ServerFnError> {
 #[server]
 pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnError> {
     use crate::db;
+
+    if text.len() > MAX_IMPORT_BYTES {
+        return Err(ServerFnError::new(format!(
+            "导入内容太大（{} KB，上限 {} KB）",
+            text.len() / 1024,
+            MAX_IMPORT_BYTES / 1024
+        )));
+    }
 
     let parsed = crate::transfer::parse_any(&text);
     if parsed.is_empty() {
@@ -1452,6 +1490,11 @@ pub async fn export_bookmarks_html() -> String {
 /// 拷 `mtab.db` 会丢掉那部分（README 里"数据落在 /data/mtab.db"那种说法容易
 /// 让人以为直接拷文件就行）。`VACUUM INTO` 是 SQLite 官方给的一致快照做法，
 /// 产出一个单文件、可直接拿去替换或另存。
+///
+/// 快照落在**应用自己的数据目录**里而不是系统临时目录：临时目录在 Linux 上
+/// 默认是 `/tmp`（`umask` 之下同机的别的用户也读得到），而这份快照里除了书签
+/// 还有 `settings` 表的会话密钥与快捷添加令牌。写完立刻删掉，删不掉也会
+/// 提醒一句。
 #[cfg(feature = "server")]
 pub async fn export_database_snapshot() -> Result<Vec<u8>, String> {
     use crate::db;
@@ -1460,7 +1503,8 @@ pub async fn export_database_snapshot() -> Result<Vec<u8>, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("nekotab-snapshot-{nanos}.sqlite"));
+    let path = db::data_dir()
+        .join(format!("nekotab-snapshot-{nanos}.sqlite"));
 
     // VACUUM INTO 要求目标文件不存在；并发的两次导出各有各的时间戳，不会撞
     let target = path.to_string_lossy().to_string();
@@ -1475,7 +1519,9 @@ pub async fn export_database_snapshot() -> Result<Vec<u8>, String> {
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| format!("读取快照失败: {e}"))?;
-    let _ = tokio::fs::remove_file(&path).await;
+    if let Err(e) = tokio::fs::remove_file(&path).await {
+        eprintln!("[NekoTab] 临时快照删除失败（{}），请手动清理: {e}", path.display());
+    }
 
     Ok(bytes)
 }
@@ -1496,6 +1542,9 @@ struct Hitokoto {
 }
 
 /// 复用一个客户端，避免每次请求都重做 TLS 握手。favicon 代取也复用它。
+///
+/// 重定向策略来自 [`crate::netguard`]：每一跳都重新判一次目标，不许跳到内网
+/// 地址上去——被收藏的第三方站点（作者可控）能用一个 302 把服务端引到内网。
 #[cfg(feature = "server")]
 pub(crate) fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -1503,6 +1552,7 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(8))
+            .redirect(crate::netguard::redirect_policy())
             .build()
             .expect("创建 HTTP 客户端失败")
     })
@@ -1512,6 +1562,10 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
 ///
 /// 超时比通用客户端短（6 秒）：一次要探几十条，每条都慢 8 秒的话整轮要等
 /// 好几分钟。带一个常见的浏览器 UA——有些站点对陌生 UA 直接 403。
+///
+/// 重定向策略与通用客户端一致：不许跳到内网地址上去。探测的是用户自己的
+/// 书签（初始地址是内网的照样能探），但导入来的恶意书签可能想借这一步让服务端
+/// 去打内网——虽然只能拿到状态码、拿不到内容，仍然没必要开着。
 #[cfg(feature = "server")]
 pub(crate) fn link_check_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -1525,6 +1579,7 @@ pub(crate) fn link_check_client() -> &'static reqwest::Client {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             )
+            .redirect(crate::netguard::redirect_policy())
             .build()
             .expect("创建 HTTP 客户端失败")
     })

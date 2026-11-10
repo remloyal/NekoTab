@@ -145,10 +145,22 @@ pub async fn add_handler(Query(params): Query<HashMap<String, String>>) -> Respo
 
 /// `POST /api/bookmark`，请求体是 JSON。给脚本 / 浏览器扩展用，
 /// 回 JSON 而不是 HTML。
-pub async fn post_handler(Json(body): Json<QuickAddRequest>) -> Response {
+///
+/// 令牌可以放在请求体的 `token` 字段里，也可以放在 `Authorization: Bearer …`
+/// 头里——后者更该用：令牌在请求体里虽然不进 URL，但仍然会被中间的反代记进
+/// 请求体日志；放在头里通常不会被记。
+pub async fn post_handler(
+    headers: dioxus::server::axum::http::HeaderMap,
+    Json(body): Json<QuickAddRequest>,
+) -> Response {
     let pool = crate::db::pool();
 
-    match token_matches(pool, &body.token).await {
+    let provided = match bearer_token(&headers) {
+        Some(token) if !token.is_empty() => token,
+        _ => body.token.clone(),
+    };
+
+    match token_matches(pool, &provided).await {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -185,6 +197,13 @@ pub async fn post_handler(Json(body): Json<QuickAddRequest>) -> Response {
     }
 }
 
+/// 从 `Authorization: Bearer …` 里取令牌。
+fn bearer_token(headers: &dioxus::server::axum::http::HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let rest = value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer "))?;
+    Some(rest.trim().to_string())
+}
+
 /// 一条结果小页面。`message` 会转义后再拼进 HTML。
 fn html_page(status: StatusCode, message: &str) -> Response {
     let body = format!(
@@ -205,6 +224,9 @@ fn html_page(status: StatusCode, message: &str) -> Response {
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
+            // 这个页面的地址里带着令牌（小工具只能靠导航提交），别让它顺着
+            // Referer 头漏给别的站点
+            (header::REFERRER_POLICY, "no-referrer"),
         ],
         body,
     )
