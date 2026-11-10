@@ -98,6 +98,20 @@ fn effective_group(bookmark: &Bookmark, known: &HashSet<i64>) -> Option<i64> {
     }
 }
 
+/// 组件在当前分类下是否显示。
+///
+/// 组件的分组是"可选归属"：没归属（`None`，含指向已删分组的 id）的是全局挂件，
+/// 每个标签页都显示；归属了分组的只在那组和「全部」下出现。于是「全部」始终是
+/// 全集，而某个分组页会带上自己那几张，不会侵入别的组。
+fn widget_visible(item: &Bookmark, filter: Filter, known: &HashSet<i64>) -> bool {
+    let group = effective_group(item, known);
+    match filter {
+        Filter::All => true,
+        Filter::Ungrouped => group.is_none(),
+        Filter::Group(id) => group.is_none() || group == Some(id),
+    }
+}
+
 /// 关键词匹配：空格分词，词之间 AND，每词在 title / url / description / tags 里找。
 ///
 /// 口径与服务端 `list_bookmarks(query)` 的 SQL 一致，只是搬到客户端做，
@@ -339,10 +353,18 @@ pub fn Home() -> Element {
         matched[start..end].to_vec()
     };
 
-    // 显示列表 = 组件（按它们自己的顺序）++ 本页书签。
+    // 显示列表 = 本组可见的组件（按它们自己的顺序）++ 本页书签。
     // 组件与书签的 sort_order 共用一列，但显示时按 kind 分两段，所以两边互不干扰：
     // 拖拽也只在同类之间生效（见 on_reorder），于是这一段始终是稳定的前缀。
-    let view: Vec<Bookmark> = widgets.iter().cloned().chain(page_of_bookmarks).collect();
+    let visible_widgets: Vec<Bookmark> = widgets
+        .iter()
+        .filter(|item| widget_visible(item, filter, &known_group_ids))
+        .cloned()
+        .collect();
+    let view: Vec<Bookmark> = visible_widgets
+        .into_iter()
+        .chain(page_of_bookmarks)
+        .collect();
 
     let is_editing = editing();
     let is_selecting = selecting();
@@ -1156,6 +1178,8 @@ pub fn Home() -> Element {
                                     key: "{card.id}",
                                     card: Some(card.clone()),
                                     kind: card.kind.clone(),
+                                    groups: groups.clone(),
+                                    default_group: None,
                                     on_cancel: move |_| modal.set(ModalState::None),
                                     on_saved: move |_| {
                                         modal.set(ModalState::None);
@@ -1373,6 +1397,52 @@ mod tests {
         let counts = count_by_group(&[a, b, c], &known);
         assert_eq!(counts.get(&crate::components::group_value(1)), Some(&1));
         assert_eq!(counts.get(GROUP_UNGROUPED), Some(&2));
+    }
+
+    /// 组件的分组是可选归属：没归属的每个分组页都显示，归属了的只在那组和「全部」下出现。
+    #[test]
+    fn widgets_without_a_group_are_global() {
+        let known: HashSet<i64> = [1, 2].into_iter().collect();
+        let global = widget(1, crate::models::KIND_CLOCK);
+
+        for filter in [
+            Filter::All,
+            Filter::Ungrouped,
+            Filter::Group(1),
+            Filter::Group(2),
+        ] {
+            assert!(
+                widget_visible(&global, filter, &known),
+                "没归属的组件在任何分类下都显示：{filter:?}"
+            );
+        }
+
+        // 指向已删分组的 id 也按全局处理：组件不会从所有标签页里消失
+        let mut dangling = widget(2, crate::models::KIND_NOTE);
+        dangling.group_id = Some(99);
+        assert!(widget_visible(&dangling, Filter::Group(1), &known));
+        assert!(widget_visible(&dangling, Filter::Ungrouped, &known));
+    }
+
+    #[test]
+    fn grouped_widgets_stay_in_their_group_and_all() {
+        let known: HashSet<i64> = [1, 2].into_iter().collect();
+        let mut in_dev = widget(1, crate::models::KIND_CLOCK);
+        in_dev.group_id = Some(1);
+
+        assert!(
+            widget_visible(&in_dev, Filter::All, &known),
+            "「全部」始终是全集"
+        );
+        assert!(widget_visible(&in_dev, Filter::Group(1), &known));
+        assert!(
+            !widget_visible(&in_dev, Filter::Group(2), &known),
+            "不能串到别的组"
+        );
+        assert!(
+            !widget_visible(&in_dev, Filter::Ungrouped, &known),
+            "归了组就不算未分组"
+        );
     }
 
     #[test]

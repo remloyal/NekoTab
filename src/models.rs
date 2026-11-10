@@ -12,9 +12,9 @@ pub struct Bookmark {
     /// 逗号分隔的标签串，如 `"rust,web,工具"`。标签不再是分类（分类见 `Group`），
     /// 只作为检索词，服务端搜索与客户端筛选都会匹配它。
     pub tags: String,
-    /// 所属分组；`None` 即"未分组"（不占一行，由前端合成）。
+    /// 所属分组；`None` 对书签是"未分组"，对组件是"全局"（所有分组页都显示）。
     ///
-    /// 一条书签只属于一个分组。库里还有一个 `group_ids` 列（迁移 007 留下的），
+    /// 一条卡片只属于一个分组。库里还有一个 `group_ids` 列（迁移 007 留下的），
     /// 它从此不再被读写——见迁移 011 的说明。
     pub group_id: Option<i64>,
     /// 自定义图标。空串表示自动（按 host 代取），其余取值与分组图标同一套约定，
@@ -610,7 +610,7 @@ pub struct NewBookmark {
     pub url: String,
     pub description: String,
     pub tags: String,
-    /// 留空表示"未分组"
+    /// 留空：书签表示"未分组"，组件表示"全局"（所有分组页都显示）
     #[serde(default)]
     pub group_id: Option<i64>,
     /// 留空表示自动取站点图标

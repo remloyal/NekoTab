@@ -106,12 +106,37 @@ pub(crate) struct CleanBookmark {
     pub surface: String,
 }
 
+/// 落库前确认分组还在：不存在就丢掉，免得留下指向空气的 id。
+///
+/// 书签与组件共用这一条校验，但「空」的含义由各自的读法决定——书签读作未分组，
+/// 组件读作全局。只在该字段真的填了值时才查库，所以不选分组的卡片（以及只校验
+/// 参数的测试）不需要 groups 表。
+#[cfg(feature = "server")]
+async fn resolve_group_id(
+    pool: &sqlx::SqlitePool,
+    requested: Option<i64>,
+) -> Result<Option<i64>, String> {
+    let Some(id) = requested.filter(|id| *id > 0) else {
+        return Ok(None);
+    };
+
+    sqlx::query_scalar("SELECT id FROM groups WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("读取分组失败: {e}"))
+}
+
 /// 校验并规范化卡片入参。新增与修改共用，避免两处校验漂移。
 ///
-/// 书签与组件分两条路走：书签必须有合法网址、可以进分组带标签；组件没有网址，
-/// 也不属于任何分组（分组标签页算的是书签），参数按 kind 规范化后落库。
+/// 书签与组件分两条路走：书签必须有合法网址、带标签；组件没有网址，参数按 kind
+/// 规范化后落库。分组两条路都能填，但含义不同——书签的 `None` 是「未分组」，
+/// 组件的 `None` 是「全局」（所有分组页都显示）。
 #[cfg(feature = "server")]
-async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
+async fn clean_bookmark(
+    input: &NewBookmark,
+    pool: &sqlx::SqlitePool,
+) -> Result<CleanBookmark, String> {
     use crate::models::{
         is_widget_kind, text_icon_parts, CalendarConfig, ClockConfig, DialConfig, HotSearchConfig,
         NoteConfig, TodoConfig, VisitsConfig, WeatherConfig, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL,
@@ -199,7 +224,8 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
             url: String::new(),
             description: input.description.trim().to_string(),
             tags: String::new(),
-            group_id: None,
+            // 组件也可以归组：不选就是全局，选了只在该分组下出现。
+            group_id: resolve_group_id(pool, input.group_id).await?,
             icon,
             span_w,
             span_h,
@@ -220,13 +246,7 @@ async fn clean_bookmark(input: &NewBookmark) -> Result<CleanBookmark, String> {
 
     // 分组可能已被删掉，落库前确认一次；不存在就丢掉，免得留下指向空气的 id
     // 让条目在任何分组标签下都不显示。
-    let known_groups: Vec<i64> = sqlx::query_scalar("SELECT id FROM groups")
-        .fetch_all(crate::db::pool())
-        .await
-        .map_err(|e| format!("读取分组失败: {e}"))?;
-    let group_id = input
-        .group_id
-        .filter(|id| *id > 0 && known_groups.contains(id));
+    let group_id = resolve_group_id(pool, input.group_id).await?;
 
     Ok(CleanBookmark {
         title,
@@ -467,7 +487,9 @@ pub(crate) async fn ensure_url_not_taken(
 pub async fn add_bookmark(input: NewBookmark) -> Result<AddOutcome, ServerFnError> {
     use crate::db;
 
-    let row = clean_bookmark(&input).await.map_err(ServerFnError::new)?;
+    let row = clean_bookmark(&input, db::pool())
+        .await
+        .map_err(ServerFnError::new)?;
 
     insert_new_bookmark(db::pool(), row)
         .await
@@ -480,7 +502,9 @@ pub async fn add_bookmark(input: NewBookmark) -> Result<AddOutcome, ServerFnErro
 pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFnError> {
     use crate::db;
 
-    let row = clean_bookmark(&input).await.map_err(ServerFnError::new)?;
+    let row = clean_bookmark(&input, db::pool())
+        .await
+        .map_err(ServerFnError::new)?;
 
     // 网址查重只对书签有意义：组件的 url 是空串，且它的唯一性由 kind 去重保证
     if row.kind.is_empty() {
@@ -625,7 +649,8 @@ pub async fn move_bookmarks(ids: Vec<i64>, group_id: Option<i64>) -> Result<usiz
 
     let mut affected = 0usize;
     for id in &ids {
-        // 组件不属于任何分组：即使调用方误传了组件 id 也写不进去。
+        // 批量移动只作用于书签：组件虽然也能归组，但它的归属在组件自己的设置里改，
+        // 批量选择里混进来的组件 id 写不进去。
         affected += sqlx::query("UPDATE bookmarks SET group_id = ? WHERE id = ? AND kind = ''")
             .bind(group_id)
             .bind(id)
@@ -2065,6 +2090,28 @@ mod tests {
         .await
         .expect("create table");
 
+        sqlx::query(
+            "CREATE TABLE groups (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                name       TEXT NOT NULL,
+                icon       TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create groups");
+
+        for (id, name) in [(1, "开发"), (2, "生活")] {
+            sqlx::query("INSERT INTO groups (id, name, sort_order) VALUES (?, ?, ?)")
+                .bind(id)
+                .bind(name)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .expect("insert group");
+        }
+
         let rows = [
             (
                 "Rust 官网",
@@ -2257,6 +2304,15 @@ mod tests {
             .expect("count")
     }
 
+    /// 一个空库：用来证明某条路径完全不查表（查了就会因缺表报错）。
+    async fn empty_pool() -> SqlitePool {
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect empty in-memory sqlite")
+    }
+
     /// 一个最小可入库行；只关心去重与跨度时用得上。
     fn row(title: &str, url: &str) -> CleanBookmark {
         CleanBookmark {
@@ -2356,22 +2412,26 @@ mod tests {
     #[tokio::test]
     async fn card_surface_is_normalised_by_clean_bookmark() {
         // 归一化在 clean_bookmark 这一层做完（CleanBookmark 是"已校验"的类型，
-        // insert 只管写）。组件那条路不碰数据库，所以这里不需要连接池。
+        // insert 只管写）。不选分组的组件不查表，所以给个空库就够。
+        let pool = empty_pool().await;
         let input = NewBookmark {
             title: "数字时钟".to_string(),
             kind: crate::models::KIND_CLOCK.to_string(),
             surface: "rainbow".to_string(),
             ..Default::default()
         };
-        let cleaned = clean_bookmark(&input).await.expect("组件不需要数据库");
+        let cleaned = clean_bookmark(&input, &pool).await.expect("不查表");
         assert_eq!(cleaned.surface, "", "认不出的面应收敛成'没设过'");
 
-        let cleaned = clean_bookmark(&NewBookmark {
-            surface: "solid".to_string(),
-            ..input
-        })
+        let cleaned = clean_bookmark(
+            &NewBookmark {
+                surface: "solid".to_string(),
+                ..input
+            },
+            &pool,
+        )
         .await
-        .expect("组件不需要数据库");
+        .expect("不查表");
         assert_eq!(cleaned.surface, "solid", "白名单里的值原样保留");
     }
 
@@ -2404,18 +2464,23 @@ mod tests {
     #[tokio::test]
     async fn unknown_widget_kind_is_rejected() {
         // 不在白名单里的类型直接拒收：放进去就等于让渲染层收到没见过的分支
+        let pool = empty_pool().await;
         let bad = NewBookmark {
             title: "彩虹".to_string(),
             kind: "rainbow".to_string(),
             ..Default::default()
         };
-        let err = clean_bookmark(&bad).await.err().expect("未知类型应被拒收");
+        let err = clean_bookmark(&bad, &pool)
+            .await
+            .err()
+            .expect("未知类型应被拒收");
         assert!(err.contains("不认识的卡片类型"), "实际：{err}");
     }
 
-    /// 组件这条路不该碰数据库（它没有网址、不进分组），所以不需要连接池也能测。
+    /// 不选分组的组件不查表（它没有网址、没有归属），所以空库也能测。
     #[tokio::test]
     async fn widget_needs_no_url_and_gets_a_normalised_config() {
+        let pool = empty_pool().await;
         let clock = NewBookmark {
             title: "数字时钟".to_string(),
             kind: crate::models::KIND_CLOCK.to_string(),
@@ -2426,10 +2491,10 @@ mod tests {
             ..Default::default()
         };
 
-        let cleaned = clean_bookmark(&clock).await.expect("组件不需要数据库");
+        let cleaned = clean_bookmark(&clock, &pool).await.expect("不查表");
         assert_eq!(cleaned.kind, crate::models::KIND_CLOCK);
         assert_eq!(cleaned.url, "", "组件没有网址");
-        assert_eq!(cleaned.group_id, None, "组件不进分组");
+        assert_eq!(cleaned.group_id, None, "不选分组就是全局");
         assert_eq!(cleaned.tags, "");
         assert_eq!((cleaned.span_w, cleaned.span_h), (2, 2));
         assert_eq!(
@@ -2446,13 +2511,38 @@ mod tests {
             title: "没网址".to_string(),
             ..Default::default()
         };
-        assert!(clean_bookmark(&bare).await.is_err());
+        assert!(clean_bookmark(&bare, &pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn widget_can_belong_to_a_group_and_dangling_ids_are_dropped() {
+        let pool = seed().await;
+
+        let grouped = NewBookmark {
+            title: "数字时钟".to_string(),
+            kind: crate::models::KIND_CLOCK.to_string(),
+            group_id: Some(1),
+            ..Default::default()
+        };
+        let cleaned = clean_bookmark(&grouped, &pool).await.expect("合法分组");
+        assert_eq!(cleaned.group_id, Some(1), "组件可以归属于一个分组");
+
+        // 指向已删分组：丢掉而不是报错，组件回落成全局
+        let dangling = NewBookmark {
+            group_id: Some(99),
+            ..grouped
+        };
+        let cleaned = clean_bookmark(&dangling, &pool)
+            .await
+            .expect("悬空分组不该拒收");
+        assert_eq!(cleaned.group_id, None, "悬空 id 回落成全局");
     }
 
     #[tokio::test]
     async fn note_text_is_capped_before_it_reaches_the_database() {
         use crate::models::{NoteConfig, NOTE_MAX_CHARS};
 
+        let pool = empty_pool().await;
         // 内容是自由文本，一次粘贴就可能上千字，而它会跟着每次列表响应一起回去
         let input = NewBookmark {
             title: "记事本".to_string(),
@@ -2464,7 +2554,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cleaned = clean_bookmark(&input).await.expect("组件不需要数据库");
+        let cleaned = clean_bookmark(&input, &pool).await.expect("不查表");
         let saved = NoteConfig::parse(&cleaned.config);
         assert_eq!(saved.text.chars().count(), NOTE_MAX_CHARS, "落库前已截断");
         assert_eq!(cleaned.url, "", "记事本同样没有网址");

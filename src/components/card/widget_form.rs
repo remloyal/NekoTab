@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::backend::{add_bookmark, error_text, update_bookmark};
 use crate::models::{
-    clamp_span, widget_label, AddOutcome, Bookmark, CalendarConfig, ClockConfig, DialConfig,
+    clamp_span, widget_label, AddOutcome, Bookmark, CalendarConfig, ClockConfig, DialConfig, Group,
     HotSearchConfig, NewBookmark, NoteConfig, TodoConfig, TodoItem, VisitsConfig, WeatherConfig,
     CARD_SURFACES, HOT_SOURCES, KIND_CALENDAR, KIND_CLOCK, KIND_DIAL, KIND_HOT, KIND_NOTE,
     KIND_TODO, KIND_VISITS, KIND_WEATHER, NOTE_MAX_CHARS, SPAN_MAX, SPAN_PRESETS, TODO_MAX_ITEMS,
@@ -14,13 +14,17 @@ use crate::models::{
 /// `card` 为 `None` 时是新增（种类取 `kind`），为 `Some` 时是修改。
 ///
 /// 与 `BookmarkForm` 分成两个组件，而不是在它里面按种类分支：两者的字段几乎没有
-/// 交集（组件没有网址、分组、标签、图标），合在一起会让每个字段都挂一个"当前是
-/// 什么卡片"的判断，而那种判断正是以后加字段时最容易漏的地方。
+/// 交集（组件没有网址、标签、图标），合在一起会让每个字段都挂一个"当前是
+/// 什么卡片"的判断，而那种判断正是以后加字段时最容易漏的地方。分组是个例外——
+/// 两边都有，但语义不同：书签不选是「未分组」，组件不选是「全局」。
 #[component]
 pub fn WidgetForm(
     card: Option<Bookmark>,
     /// 新增时的种类；修改时以 `card.kind` 为准
     kind: String,
+    groups: Vec<Group>,
+    /// 新增时的默认分组（跟着当前筛选走）
+    default_group: Option<i64>,
     on_saved: EventHandler<()>,
     on_cancel: EventHandler<()>,
 ) -> Element {
@@ -58,6 +62,16 @@ pub fn WidgetForm(
             .as_ref()
             .map(|card| card.title.clone())
             .unwrap_or_else(|| label.to_string())
+    });
+    // 归属：`None` 是全局（每个分组页都显示）。指向已删分组的 id 当作全局，
+    // 与服务端 delete_group 把 `group_id` 清空的兜底一致。
+    let known_group_ids: Vec<i64> = groups.iter().map(|group| group.id).collect();
+    let mut group_id = use_signal(|| {
+        existing
+            .as_ref()
+            .and_then(|card| card.group_id)
+            .filter(|id| known_group_ids.contains(id))
+            .or(default_group)
     });
     let mut hour12 = use_signal(|| clock.hour12);
     // 两种时钟都有"秒"这一个开关，是同一个概念，共用一个信号；取哪一份看是什么组件
@@ -129,7 +143,7 @@ pub fn WidgetForm(
             url: String::new(),
             description: keep_description.clone(),
             tags: String::new(),
-            group_id: None,
+            group_id: group_id(),
             icon: keep_icon.clone(),
             span_w: span_w(),
             span_h: span_h(),
@@ -401,6 +415,31 @@ pub fn WidgetForm(
                     p { class: "field-hint",
                         "统计你自己从卡片打开书签的次数（数据存在服务端，换设备也带着）。"
                     }
+                }
+            }
+
+            div { class: "field",
+                span { class: "field-label", "显示在" }
+                div { class: "segmented wrap",
+                    button {
+                        class: if group_id().is_none() { "segment active" } else { "segment" },
+                        r#type: "button",
+                        onclick: move |_| group_id.set(None),
+                        "所有分组"
+                    }
+                    for group in groups {
+                        button {
+                            key: "{group.id}",
+                            class: if group_id() == Some(group.id) { "segment active" } else { "segment" },
+                            r#type: "button",
+                            onclick: move |_| group_id.set(Some(group.id)),
+                            "{group.name}"
+                        }
+                    }
+                }
+                p { class: "field-hint",
+                    "不选就是全局：每个分组页都显示。选了就只在该分组和「全部」里出现；"
+                    "组件仍不参与分组条数与分页。分组在设置 → 分组管理里增删。"
                 }
             }
 

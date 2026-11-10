@@ -100,6 +100,8 @@ pub fn AddCardDialog(
                             WidgetForm {
                                 card: existing,
                                 kind: chosen.clone(),
+                                groups: groups.clone(),
+                                default_group,
                                 on_cancel: move |_| on_close.call(()),
                                 on_saved: move |_| on_saved.call(()),
                             }
