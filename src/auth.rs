@@ -14,7 +14,7 @@
 //!   发起请求时没有这里的会话 Cookie。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -35,15 +35,6 @@ const LOCK_FOR: Duration = Duration::from_secs(60);
 struct Config {
     password: String,
     key: ring::hmac::Key,
-    /// 会话版本号。登出时 +1，之前签发的 Cookie 全部作废。
-    ///
-    /// 签名里带着它，于是"这个会话是不是登出之前签的"这件事能验出来——
-    /// 只清浏览器 Cookie 是不够的：Cookie 是无状态的，复制走的那一份在 30 天
-    /// 内照样能用，复制来的会话没法靠清 Cookie 止损。
-    ///
-    /// 单用户部署里"退出登录"就意味着"所有设备上的会话一起作废"，不做
-    /// 多设备会话表——多设备各自登出反而是书签页自己会遇到的常态。
-    version: AtomicU64,
 }
 
 static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
@@ -77,9 +68,6 @@ pub async fn init_from_env() {
         .ok()
         .filter(|value| !value.trim().is_empty());
 
-    // 会话版本号：登出时 +1，之前签发的 Cookie 全部作废。
-    let version = persisted_session_version().await;
-
     let (key, source) = match env_secret {
         Some(secret) => (
             ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes()),
@@ -112,48 +100,11 @@ pub async fn init_from_env() {
         },
     };
 
-    if CONFIG
-        .set(Some(Config {
-            password,
-            key,
-            version: AtomicU64::new(version),
-        }))
-        .is_err()
-    {
+    if CONFIG.set(Some(Config { password, key })).is_err() {
         eprintln!("[NekoTab] 访问密码配置已初始化过，忽略本次环境变量");
         return;
     }
     println!("[NekoTab] 访问密码已启用（登录状态保持 30 天，密钥来源：{source}）");
-}
-
-/// 从 `settings` 表取会话版本号；没有就是 0。
-///
-/// 存进库是为了重启后仍然认得"这个会话是登出前签的"——只放在内存里的话，
-/// 重启一次就把所有旧 Cookie 放回来了。
-async fn persisted_session_version() -> u64 {
-    let pool = crate::db::pool();
-
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'session_version'")
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    if let Some(value) = existing.as_deref().and_then(|v| v.trim().parse::<u64>().ok()) {
-        return value;
-    }
-
-    let _ = sqlx::query("INSERT OR IGNORE INTO settings (key, value) VALUES ('session_version', '0')")
-        .execute(pool)
-        .await;
-
-    sqlx::query_scalar("SELECT value FROM settings WHERE key = 'session_version'")
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|value: String| value.trim().parse::<u64>().ok())
-        .unwrap_or(0)
 }
 
 /// 从 `settings` 表取会话密钥；没有就生成 32 字节随机数存进去。
@@ -247,64 +198,36 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// 被签名的内容：会话版本 + 过期时间。
+/// 签发一个会话 token：`过期时间.签名`。
 ///
-/// 版本进签名，于是"这个会话是不是登出之前签的"这件事能被验出来。
-fn token_payload(version: u64, expiry: u64) -> String {
-    format!("{version}.{expiry}")
-}
-
+/// **服务端不存会话状态**：token 自证身份（签名覆盖过期时间），重启后仍然有效，
+/// 代价是它没法被单独吊销——「退出登录」只能让当前这个浏览器把 Cookie 删掉
+/// （见 [`logout`] 的说明）。
 fn make_token(cfg: &Config) -> String {
-    let version = cfg.version.load(Ordering::Relaxed);
     let expiry = now_secs() + SESSION_SECS;
-    let signature = ring::hmac::sign(&cfg.key, token_payload(version, expiry).as_bytes());
-    format!("{version}.{expiry}.{}", hex(signature.as_ref()))
+    let signature = ring::hmac::sign(&cfg.key, expiry.to_string().as_bytes());
+    format!("{expiry}.{}", hex(signature.as_ref()))
 }
 
 fn token_ok(cfg: &Config, token: &str) -> bool {
-    let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
-        return false;
-    }
-    let Some(version) = parts[0].parse::<u64>().ok() else {
+    let Some((expiry, signature)) = token.split_once('.') else {
         return false;
     };
-    let Some(expiry) = parts[1].parse::<u64>().ok() else {
-        return false;
-    };
-    let signature = parts[2];
-    // 登出后版本号变了 → 之前签的会话一律作废
-    if version != cfg.version.load(Ordering::Relaxed) {
+    // 签名里带点，多出来的部分不算
+    if signature.contains('.') {
         return false;
     }
+    let Ok(expiry) = expiry.parse::<u64>() else {
+        return false;
+    };
     if expiry < now_secs() {
         return false;
     }
     let Some(signature) = unhex(signature) else {
         return false;
     };
-    let expected = ring::hmac::sign(&cfg.key, token_payload(version, expiry).as_bytes());
+    let expected = ring::hmac::sign(&cfg.key, expiry.to_string().as_bytes());
     constant_eq(expected.as_ref(), &signature)
-}
-
-/// 登出：会话版本 +1，之前签发的 Cookie 全部作废。
-///
-/// 内存里的版本号总是先加（哪怕写库失败也加）：宁可"这一次进程里旧会话立刻
-/// 失效"，也不要"登出看起来成功了、旧 Cookie 却还能用"。写库失败只影响重启
-/// 之后——那种情况下会打一行日志提示。
-async fn bump_session_version(cfg: &Config) {
-    let next = cfg.version.fetch_add(1, Ordering::SeqCst) + 1;
-    let pool = crate::db::pool();
-    let result = sqlx::query(
-        "INSERT INTO settings (key, value) VALUES ('session_version', ?1) \
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .bind(next.to_string())
-    .execute(pool)
-    .await;
-    if result.is_err() {
-        eprintln!("[NekoTab] 会话版本写库失败，重启后旧登录状态可能恢复");
-    }
 }
 
 /// 常量时间比较（长度不同直接返回 false——长度本身不是秘密）。
@@ -686,23 +609,21 @@ pub async fn login_submit(request: Request) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// `GET /logout`：作废当前会话并清 Cookie，回登录页。没启用密码时直接回首页。
+/// `GET /logout`：清掉本浏览器的 Cookie，回登录页。没启用密码时直接回首页。
 ///
-/// 只清 Cookie 是不够的：Cookie 是无状态的签名串，复制走的那一份在 30 天内
-/// 照样能用，"退出登录"对它不起作用。所以这里把**会话版本 +1**——版本进了
-/// 签名，之前签发的会话（不管在哪个设备上）全部作废。
+/// **只退这一台设备。** token 是自证的（签名覆盖过期时间），服务端不存会话表，
+/// 所以"退出登录"能做的只有让这台浏览器把手里的 Cookie 删掉——别的设备、
+/// 以及已经复制走的 Cookie 都不受影响，那与"登录状态保持 30 天"是同一个取舍。
 ///
-/// 但只有**带着有效会话**的请求才作废：`/logout` 是公开路径（登录页要能跳），
-/// 无条件 +1 的话，任何人循环 GET 一下就能把所有已登录设备永远踢下线，
-/// 而每次请求还写一次库。
+/// 想立刻废掉所有设备的登录状态，手段是**改 `ACCESS_PASSWORD`**：签名密钥由
+/// 密码派生，改完旧 token 全部验不过。这也是 README「已知限制」里写明的那条。
+///
+/// 早先这里试过"登出时把全局会话版本 +1"来让登出真正作废一切，但那是往一个
+/// 声明"服务端不存会话表"的设计里塞服务端会话状态：代价是登出一处、所有设备
+/// 一起掉线，与"只记 token 的有效期"这个模型不符，已经撤回。
 pub async fn logout(request: Request) -> Response {
     let secure = is_https(request.headers());
     let target = if config().is_some() { "/login" } else { "/" };
-    if let Some(cfg) = config() {
-        if authenticated(cfg, request.headers()) {
-            bump_session_version(cfg).await;
-        }
-    }
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, target)
@@ -751,7 +672,6 @@ mod tests {
         let cfg = Config {
             password: "pw".to_string(),
             key,
-            version: AtomicU64::new(0),
         };
         let token = make_token(&cfg);
         assert!(token_ok(&cfg, &token));
@@ -761,22 +681,17 @@ mod tests {
         assert!(!token_ok(&cfg, &broken));
     }
 
+    /// token 只有"过期时间 + 签名"两段：服务端不存会话状态，
+    /// 所以多一段的旧格式（带会话版本的）一律不认。
     #[test]
-    fn logout_invalidates_issued_tokens() {
+    fn token_is_expiry_plus_signature_only() {
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"secret");
         let cfg = Config {
             password: "pw".to_string(),
             key,
-            version: AtomicU64::new(3),
         };
         let token = make_token(&cfg);
-        assert!(token_ok(&cfg, &token));
-        // 登出：版本 +1 之后，之前签发的会话一律作废
-        cfg.version.fetch_add(1, Ordering::SeqCst);
-        assert!(!token_ok(&cfg, &token), "登出前的 Cookie 必须失效");
-        // 但新签发的还能用
-        let fresh = make_token(&cfg);
-        assert!(token_ok(&cfg, &fresh));
+        assert_eq!(token.split('.').count(), 2, "版本号已经撤回: {token}");
     }
 
     #[test]
