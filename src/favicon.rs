@@ -322,6 +322,23 @@ pub(crate) mod server {
         .map_err(|e| std::io::Error::other(e.to_string()))?
     }
 
+    /// 文件名是不是本模块生成的那种：32 位十六进制 + 已知扩展名，可能带 `.tmp`。
+    ///
+    /// 用来给"清空图标缓存"划边界：`ICON_DIR` 是环境变量给的，配错成数据目录
+    /// 时不能把目录里的东西一律删掉。
+    pub(crate) fn is_cache_file_name(name: &str) -> bool {
+        let base = name.strip_suffix(".tmp").unwrap_or(name);
+        let Some((stem, ext)) = base.rsplit_once('.') else {
+            return false;
+        };
+        stem.len() == 32
+            && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && matches!(
+                ext,
+                "png" | "jpg" | "gif" | "webp" | "svg" | "avif" | "bmp" | "ico" | "img"
+            )
+    }
+
     async fn remove_icon(file_name: &str) {
         let path = icon_dir().join(file_name);
         let _ = tokio::task::spawn_blocking(move || std::fs::remove_file(path)).await;
@@ -405,9 +422,18 @@ pub(crate) mod server {
 
         // 表里没记到的孤儿文件（例如改了扩展名之后留下的）一并清掉：
         // 这个目录是本服务专属的缓存目录，里面的东西都可以丢。
+        //
+        // 但**只删看起来像图标缓存的文件**：`ICON_DIR` 是环境变量给的，配错成
+        // 数据目录（比如 `/data`）时，无条件删目录里的一切会把 `mtab.db` 和
+        // 用户上传的壁纸一起删掉——一个"清空图标缓存"按钮不该有这种后果。
         if let Ok(mut entries) = tokio::fs::read_dir(icon_dir()).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
-                let _ = tokio::fs::remove_file(entry.path()).await;
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                if is_cache_file_name(&name) {
+                    let _ = tokio::fs::remove_file(entry.path()).await;
+                }
             }
         }
 
@@ -572,9 +598,20 @@ pub(crate) mod server {
         }
 
         let mut buf: Vec<u8> = Vec::new();
+        // 已经扫过的长度：只在**新增的那一段**里找 `</head`。
+        // 每块都对整个 buf 重扫一遍的话，分块很小（恶意站点可以一个字节一块）时
+        // 就是平方级——实测 64 字节一块的 256 KB 页面要 6.6 秒，而这段是同步 CPU、
+        // 跑在 async 任务里，几个并发就能把 worker 占满。
+        let mut scanned = 0usize;
+        const CLOSE_HEAD: &[u8] = b"</head";
+
         while let Ok(Some(chunk)) = response.chunk().await {
             buf.extend_from_slice(&chunk);
-            if buf.len() >= MAX_HTML_BYTES || find_bytes(&buf, b"</head").is_some() {
+            // 往前退 needle 长度 - 1，免得跨块边界的匹配被漏掉
+            let from = scanned.saturating_sub(CLOSE_HEAD.len() - 1);
+            let found = find_bytes(&buf[from..], CLOSE_HEAD).is_some();
+            scanned = buf.len();
+            if buf.len() >= MAX_HTML_BYTES || found {
                 break;
             }
         }
@@ -755,12 +792,21 @@ pub(crate) mod server {
     }
 
     fn image_response(content_type: String, data: Vec<u8>) -> Response {
-        Response::builder()
+        // 有些站点的图标是 SVG——那是一份**文档**，不是图片：直接访问
+        // `/icon/{host}` 会让它在本站源下执行脚本（壁纸那边同一个问题）。
+        // `sandbox` 把它关进没有脚本、也没有独立来源的沙箱；
+        // 当 `<img>` 用完全不受影响。
+        let mut response = Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_TYPE, &content_type)
             .header(header::CACHE_CONTROL, "public, max-age=604800")
             // 别让浏览器自己猜类型
-            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+        if content_type.starts_with("image/svg") {
+            response = response.header(header::CONTENT_SECURITY_POLICY, "sandbox");
+        }
+
+        response
             .body(Body::from(data))
             .unwrap_or_else(|_| not_found())
     }
@@ -840,6 +886,31 @@ mod tests {
         assert_eq!(icon_file_name("a.com", "image/vnd.microsoft.icon").rsplit('.').next(), Some("ico"));
         assert_eq!(icon_file_name("a.com", "image/png; charset=binary").rsplit('.').next(), Some("png"));
         assert_eq!(icon_file_name("a.com", "image/tiff").rsplit('.').next(), Some("img"));
+    }
+
+    /// "清空图标缓存"只能删自己生成的那种文件名。
+    ///
+    /// `ICON_DIR` 是环境变量给的：配成数据目录时，无条件删目录里的一切
+    /// 会连 `mtab.db` 和用户上传的壁纸一起删掉。
+    #[cfg(feature = "server")]
+    #[test]
+    fn cache_cleanup_only_touches_icon_files() {
+        let name = icon_file_name("a.com", "image/png");
+        assert!(server::is_cache_file_name(&name));
+        assert!(server::is_cache_file_name(&format!("{name}.tmp")), "半成品也要清");
+        assert!(server::is_cache_file_name(&format!(
+            "{}.svg",
+            "0123456789abcdef0123456789abcdef"
+        )));
+
+        // 不是本模块生成的：数据库、壁纸、任意别的文件都不能删
+        assert!(!server::is_cache_file_name("mtab.db"));
+        assert!(!server::is_cache_file_name("mtab.db-wal"));
+        assert!(!server::is_cache_file_name("a7c1d375475f783e.png"));
+        assert!(!server::is_cache_file_name("wallpaper.png"));
+        assert!(!server::is_cache_file_name("0123456789abcdef0123456789abcdef.exe"));
+        assert!(!server::is_cache_file_name("0123456789abcdef0123456789abcde.png"));
+        assert!(!server::is_cache_file_name(""));
     }
 
     #[cfg(feature = "server")]

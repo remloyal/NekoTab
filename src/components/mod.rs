@@ -18,6 +18,7 @@ mod pager;
 mod quick_add_panel;
 mod quote;
 mod search_bar;
+mod tick;
 mod settings_panel;
 mod toast;
 mod trash_panel;

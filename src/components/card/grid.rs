@@ -91,6 +91,17 @@ pub fn CardGrid(
 
             // 拖拽过程中指针可能落在任何一张卡片上，也可能滑出网格；
             // 事件最终都会冒泡到这里，所以移动与抬手都在这一层处理。
+            //
+            // 「吞掉拖拽之后那一次 click」的标记也在这里清：任何一次新的按下都
+            // 意味着"上一次拖拽的收尾已经过去了"。只在编辑态的按下里清是不够的——
+            // 退出编辑态或进入批量选择后，那条路根本不走，标记就永远是 true，
+            // 于是所有卡片的点击都被吞掉（书签打不开、批量选择点不动），
+            // 只有刷新页面才能恢复。
+            onpointerdown: move |_| {
+                if just_dragged() {
+                    just_dragged.set(false);
+                }
+            },
             onpointermove: move |evt| {
                 if !is_draggable {
                     return;

@@ -201,7 +201,7 @@ cargo check --no-default-features --features server
 cargo check --no-default-features --features web --target wasm32-unknown-unknown
 ```
 
-单测共 189 个。覆盖范围与关键断言见[设计文档](docs/DESIGN.md)的「测试覆盖」。
+单测共 190 个。覆盖范围与关键断言见[设计文档](docs/DESIGN.md)的「测试覆盖」。
 
 ## 生产构建
 

@@ -1,63 +1,52 @@
 use dioxus::prelude::*;
 
-// 只在客户端的刷新循环里用到（"现在几点"服务端不知道）
-#[cfg(feature = "web")]
+use crate::components::tick::use_tick;
 use crate::timefmt::{format_clock, weekday_name};
 
 /// 首页大时钟。
 ///
-/// SSR 阶段无法得知"现在"，因此首屏渲染空串；`use_future` 只在客户端
-/// 持续刷新时间，这样服务端与客户端首次渲染结果一致，不会 hydration 失配。
+/// SSR 阶段无法得知"现在"，因此首屏渲染空串；挂载后由 [`use_tick`] 每秒刷新，
+/// 这样服务端与客户端首次渲染结果一致，不会 hydration 失配。
+///
+/// **格式化必须在渲染里做，不能塞进 `use_future`。** `use_future` 只跑一次，
+/// 闭包捕获的是挂载那一刻的 props；把 `format_clock` 之类的调用放进去的话，
+/// 设置里改了 12 小时制 / 显示秒 / 农历，大时钟要刷新页面才变（网格里的时钟
+/// 组件反而是对的——它一直按这条约定写）。
 #[component]
 pub fn Clock(show_lunar: bool, show_day: bool, hour12: bool, show_seconds: bool) -> Element {
-    // 服务端分支里没有写入，`mut` 只在 web 下需要
-    #[cfg_attr(feature = "server", allow(unused_mut))]
-    let mut time = use_signal(String::new);
-    #[cfg_attr(feature = "server", allow(unused_mut))]
-    let mut date = use_signal(String::new);
-    #[cfg_attr(feature = "server", allow(unused_mut))]
-    let mut meta = use_signal(String::new);
+    let tick = use_tick();
 
-    use_future(move || async move {
-        #[cfg(feature = "web")]
-        loop {
-            let now = js_sys::Date::new_0();
-            let (year, month, day) = (
-                now.get_full_year(),
-                now.get_month() + 1,
-                now.get_date(),
+    // 还没打上第一拍（SSR、或客户端刚挂载）时全部空串，两边不会失配
+    let (time, date, meta) = match tick() {
+        Some(now) => {
+            let time = format_clock(now.hours, now.minutes, now.seconds, hour12, show_seconds);
+            let date = format!(
+                "{}年{}月{}日 {}",
+                now.year,
+                now.month,
+                now.day,
+                weekday_name(now.weekday)
             );
-
-            let hours = now.get_hours();
-            let minutes = now.get_minutes();
-            let seconds = now.get_seconds();
-
-            time.set(format_clock(hours, minutes, seconds, hour12, show_seconds));
-
-            date.set(format!(
-                "{year}年{month}月{day}日 {}",
-                weekday_name(now.get_day())
-            ));
 
             // 农历与"第几天/第几周"按需拼接，都是纯计算，不额外发请求
             let mut parts: Vec<String> = Vec::new();
             if show_lunar {
-                if let Some(lunar) = crate::lunar::solar_to_lunar(year, month, day) {
+                if let Some(lunar) = crate::lunar::solar_to_lunar(now.year, now.month, now.day) {
                     parts.push(lunar.full_name());
                 }
             }
             if show_day {
                 parts.push(format!(
                     "第 {} 天 · 第 {} 周",
-                    crate::lunar::day_of_year(year, month, day),
-                    crate::lunar::iso_week(year, month, day)
+                    crate::lunar::day_of_year(now.year, now.month, now.day),
+                    crate::lunar::iso_week(now.year, now.month, now.day)
                 ));
             }
-            meta.set(parts.join(" · "));
 
-            gloo_timers::future::TimeoutFuture::new(1000).await;
+            (time, date, parts.join(" · "))
         }
-    });
+        None => (String::new(), String::new(), String::new()),
+    };
 
     rsx! {
         header { class: "clock",

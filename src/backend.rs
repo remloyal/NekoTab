@@ -1606,8 +1606,9 @@ pub async fn check_links(ids: Vec<i64>) -> Result<Vec<LinkCheck>, ServerFnError>
     let wanted: Vec<(i64, String, String)> = if ids.is_empty() {
         rows
     } else {
+        let wanted_ids: std::collections::HashSet<i64> = ids.into_iter().collect();
         rows.into_iter()
-            .filter(|(id, _, _)| ids.contains(id))
+            .filter(|(id, _, _)| wanted_ids.contains(id))
             .collect()
     };
 
@@ -1635,11 +1636,16 @@ async fn save_link_status(
         .map_err(|e| ServerFnError::new(format!("开始事务失败: {e}")))?;
 
     for item in results {
+        // 带上 `url` 一起比对：一次检测可能跑几分钟（几千条、每条最多 6 秒），
+        // 期间用户完全可能把某条网址改掉。只按 id 写回的话，新地址会被贴上
+        // 旧地址的检测结果（"这链接是坏的"，其实坏的已经不是它了）。
         sqlx::query(
-            "UPDATE bookmarks SET link_status = ?, link_checked_at = datetime('now') WHERE id = ?",
+            "UPDATE bookmarks SET link_status = ?, link_checked_at = datetime('now') \
+             WHERE id = ? AND url = ?",
         )
         .bind(&item.status)
         .bind(item.id)
+        .bind(&item.url)
         .execute(&mut *tx)
         .await
         .map_err(|e| ServerFnError::new(format!("写入链接状态失败: {e}")))?;

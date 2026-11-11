@@ -32,8 +32,15 @@ fn custom_icon(icon: &str) -> Option<Element> {
 }
 
 /// 自定义图标里直接给了一个图片地址（而不是内置图标名或文字）。
+///
+/// 本站路径（`/…`）要排除 `//` 开头的那种：那是**协议相对地址**，浏览器会当成
+/// `https://evil.com` 去取，而不是本站。导入一份别人的备份就能塞进来一个外链
+/// 探针——背景地址那边（`models::is_allowed_background`）已经这么判了。
 fn custom_icon_url(icon: &str) -> Option<String> {
-    if icon.starts_with("http://") || icon.starts_with("https://") || icon.starts_with('/') {
+    if icon.starts_with("http://")
+        || icon.starts_with("https://")
+        || (icon.starts_with('/') && !icon.starts_with("//"))
+    {
         Some(icon.to_string())
     } else {
         None

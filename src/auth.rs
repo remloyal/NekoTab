@@ -691,11 +691,17 @@ pub async fn login_submit(request: Request) -> Response {
 /// 只清 Cookie 是不够的：Cookie 是无状态的签名串，复制走的那一份在 30 天内
 /// 照样能用，"退出登录"对它不起作用。所以这里把**会话版本 +1**——版本进了
 /// 签名，之前签发的会话（不管在哪个设备上）全部作废。
+///
+/// 但只有**带着有效会话**的请求才作废：`/logout` 是公开路径（登录页要能跳），
+/// 无条件 +1 的话，任何人循环 GET 一下就能把所有已登录设备永远踢下线，
+/// 而每次请求还写一次库。
 pub async fn logout(request: Request) -> Response {
     let secure = is_https(request.headers());
     let target = if config().is_some() { "/login" } else { "/" };
     if let Some(cfg) = config() {
-        bump_session_version(cfg).await;
+        if authenticated(cfg, request.headers()) {
+            bump_session_version(cfg).await;
+        }
     }
     Response::builder()
         .status(StatusCode::SEE_OTHER)

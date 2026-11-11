@@ -193,11 +193,18 @@ fn main() {
                     "/export/db.sqlite",
                     dioxus::server::axum::routing::get(export_database),
                 )
-                // 快捷添加：GET 给书签小工具（回一段小页面），POST 给脚本 / 扩展
+                // 快捷添加：GET 给书签小工具（回一段小页面），POST 给脚本 / 扩展。
+                //
+                // 这条路由是**公开**的（只有令牌把关），所以单独把请求体限到 64 KB：
+                // 全局那个 16 MB 是给壁纸上传的，一条"加个书签"的请求用不到，
+                // 却不设密码时谁都能拿 16 MB 来打内存。
                 .route(
                     "/api/bookmark",
                     dioxus::server::axum::routing::get(quickadd::add_handler)
-                        .post(quickadd::post_handler),
+                        .post(quickadd::post_handler)
+                        .layer(dioxus::server::axum::extract::DefaultBodyLimit::max(
+                            64 * 1024,
+                        )),
                 )
                 // 上传的壁纸：列表 / 上传 / 取用 / 删除
                 .route(
