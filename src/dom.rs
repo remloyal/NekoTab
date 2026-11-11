@@ -5,13 +5,34 @@
 //!
 //! 每个函数在非 web 构建下都有一个空实现，这样组件代码不必到处写 `#[cfg]`。
 
+/// 只放行 http(s) 的链接地址；其余（`javascript:`、`data:` …）退回 `#`。
+///
+/// 卡片、右键菜单都走它。库里的地址理论上都经过服务端校验，但历史数据、直接
+/// 改库、以及以后新增的写入路径都不在那层保护里——**渲染到 DOM 的这一处是最后
+/// 一道闸**，不能一处收紧、另一处放开。
+pub(crate) fn safe_href(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        "#".to_string()
+    }
+}
+
 /// 打开地址。`new_tab` 为假时当前页跳转。
 #[cfg(feature = "web")]
 pub fn open_url(url: &str, new_tab: bool) {
+    // 与 `safe_href` 同一口径：非 http(s) 的地址不给 `window.open`
+    //（`javascript:` 之类在个别浏览器上仍会被执行）。
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return;
+    }
+
     if let Some(window) = web_sys::window() {
-        // 由用户手势（点击/回车）触发，不会被弹窗拦截
+        // 由用户手势（点击/回车）触发，不会被弹窗拦截。
+        // `noopener` 是必须的：热搜 / 最常访问 / 搜索结果都是第三方页面，
+        // 不给它 `window.opener`，它就没法把我们这一页导航去钓鱼站。
         let target = if new_tab { "_blank" } else { "_self" };
-        let _ = window.open_with_url_and_target(url, target);
+        let _ = window.open_with_url_and_target_and_features(url, target, "noopener,noreferrer");
     }
 }
 
@@ -33,6 +54,42 @@ pub fn focus_element(id: &str) {
 
 #[cfg(not(feature = "web"))]
 pub fn focus_element(_id: &str) {}
+
+/// 把焦点送进某个容器里第一个可输入的元素。
+///
+/// 弹窗 / 抽屉打开时用：`autofocus` 写在运行时才插入的节点上浏览器不会执行，
+/// 于是"打开修改弹窗后直接打字"没反应，得先点一下输入框。
+///
+/// 找不到输入框就退到容器本身（它有 `tabindex="-1"`），这样 Tab 至少从弹窗里
+/// 开始走，而不是继续走背后被遮住的页面。
+#[cfg(feature = "web")]
+pub fn focus_first_input(container_id: &str) {
+    use wasm_bindgen::JsCast;
+
+    let Some(container) = document().and_then(|doc| doc.get_element_by_id(container_id)) else {
+        return;
+    };
+
+    let selector = "input:not([type=hidden]), textarea, select, button";
+    if let Ok(list) = container.query_selector_all(selector) {
+        for index in 0..list.length() {
+            if let Some(node) = list.item(index) {
+                if let Ok(element) = node.dyn_into::<web_sys::HtmlElement>() {
+                    if element.focus().is_ok() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(element) = container.dyn_into::<web_sys::HtmlElement>() {
+        let _ = element.focus();
+    }
+}
+
+#[cfg(not(feature = "web"))]
+pub fn focus_first_input(_container_id: &str) {}
 
 /// 把指针捕获到当前事件的目标元素上。
 ///
@@ -267,9 +324,17 @@ pub fn element_width(_id: &str) -> Option<f64> {
 
 
 /// 单调递增的毫秒时间戳，用于事件节流。
+///
+/// 用 `performance.now()` 而不是 `Date.now()`：后者是墙上时钟，NTP 校时或
+/// 用户手动改系统时间都会让它往回跳——节流条件 `now - last > N` 于是永远成立
+/// （或永远不成立），滚轮翻页、拖拽翻页这类节流会突然失灵直到时钟追回来。
 #[cfg(feature = "web")]
 pub fn now_ms() -> f64 {
-    js_sys::Date::now()
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map(|performance| performance.now())
+        // 极端情况下（老浏览器没有 performance）退回墙上时钟
+        .unwrap_or_else(js_sys::Date::now)
 }
 
 #[cfg(not(feature = "web"))]

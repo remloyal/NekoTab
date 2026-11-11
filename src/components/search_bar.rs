@@ -359,6 +359,10 @@ pub fn SearchBar(
                     value: "{value}",
                     // 点回输入框时让面板重新出现（比如刚用 Esc 收起过）
                     onclick: move |_| dismissed.set(false),
+                    // 页面的背景右键菜单会 `prevent_default` 掉原生菜单，输入框里
+                    // 就再也用不了「粘贴 / 复制」。这里拦住冒泡，让浏览器自己的
+                    // 右键菜单照常出现（只断链，不调 prevent_default）。
+                    oncontextmenu: move |evt| evt.stop_propagation(),
                     onfocus: move |_| {
                         focused.set(true);
                         dismissed.set(false);

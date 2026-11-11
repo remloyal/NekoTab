@@ -57,13 +57,8 @@ fn icon_of(bookmark: &Bookmark) -> (String, u32) {
 }
 
 fn safe_href(url: &str) -> String {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        "#".to_string()
-    }
+    crate::dom::safe_href(url)
 }
-
 /// 长按判定：按住超过该毫秒数即进入编辑态。
 #[cfg(feature = "web")]
 const LONG_PRESS_MS: u32 = 500;
@@ -141,6 +136,22 @@ pub fn CardTile(
     // 长按检测：按下时的坐标 + 递增令牌（令牌变了就说明这次按下已作废）
     let mut press_origin = use_signal(|| Option::<(f64, f64)>::None);
     let mut press_token = use_signal(|| 0u32);
+    // 长按进编辑态时置上，用来吞掉松手后那次 click（见 onpointerdown 的说明）
+    let mut swallow_click = use_signal(|| false);
+
+    // 网址或图标地址一变，就重新等图标加载。
+    //
+    // `<img>` 节点是复用的，`data-ok` 还是上一个图留下的 1——新图没加载出来
+    // （甚至 404）时都会以 opacity:1 显示，盖住底下的首字色块，碎图就直接露脸了。
+    // 这正是"没加载出来就先藏着"那套设计要避免的情况。
+    let icon_source = format!("{}|{}", bookmark.url, bookmark.icon);
+    let mut icon_source_seen = use_signal(|| icon_source.clone());
+    use_effect(move || {
+        if icon_source_seen() != icon_source {
+            icon_source_seen.set(icon_source.clone());
+            icon_loaded.set(false);
+        }
+    });
 
     let is_edit = editing && !selecting;
 
@@ -232,6 +243,8 @@ pub fn CardTile(
 
             onpointerdown: move |evt| {
                 let coords = evt.client_coordinates();
+                // 新的一次按下：上一次长按留下的"吞点击"标记作废
+                swallow_click.set(false);
 
                 if is_edit {
                     // 尽力把指针捕获到这张卡片上（拖出网格也能继续跟踪）。
@@ -242,6 +255,15 @@ pub fn CardTile(
                 }
 
                 if selecting {
+                    return;
+                }
+
+                // 只认左键 / 触摸。右键也会走 pointerdown，不筛的话按住右键
+                // 同样能"长按进入编辑态"，同时还会弹出菜单。
+                if matches!(
+                    evt.trigger_button(),
+                    Some(button) if button != dioxus::html::input_data::MouseButton::Primary
+                ) {
                     return;
                 }
 
@@ -257,6 +279,10 @@ pub fn CardTile(
                         // 期间没有移动、也没有新的按下，才算长按
                         if press_token() == token && press_origin().is_some() {
                             press_origin.set(None);
+                            // 松手之后浏览器仍会发一次 click。那一刻编辑态已经开了，
+                            // 这次 click 会走"编辑态点击=打开修改弹窗"，把用户刚
+                            // 想拖的卡片先弹出一个弹窗。吞掉它。
+                            swallow_click.set(true);
                             on_enter_edit.call(());
                         }
                     }
@@ -293,8 +319,9 @@ pub fn CardTile(
             onclick: {
                 let target = bookmark.clone();
                 move |evt| {
-                    if suppress_click {
-                        // 刚拖完，这次 click 是拖拽的尾巴
+                    if suppress_click || swallow_click() {
+                        // 刚拖完 / 刚用长按进了编辑态，这次 click 是那一下的尾巴
+                        swallow_click.set(false);
                         evt.prevent_default();
                         return;
                     }

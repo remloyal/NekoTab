@@ -170,6 +170,10 @@ fn main() {
                 Err(e) => eprintln!("[NekoTab] 图标目录创建失败，图标将不落盘: {e}"),
             }
 
+            // 迁移 013 加了 `bookmarks.host`；老数据在这里补上（只需跑一次，
+            // 之后那条查询返回 0 行）。
+            favicon::backfill_hosts().await;
+
             match wallpaper::init_wallpaper_dir() {
                 Ok(dir) => println!("[NekoTab] 壁纸目录: {}", dir.display()),
                 Err(e) => eprintln!("[NekoTab] 壁纸目录创建失败，上传将不可用: {e}"),

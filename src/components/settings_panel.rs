@@ -27,12 +27,15 @@ const IMPORT_FILE_ID: &str = "nekotab-import-file";
 const READ_FILE_SCRIPT: &str = r#"
 const input = document.getElementById('nekotab-import-file');
 const file = input && input.files && input.files[0];
+// 读完把 value 清空：浏览器只在 FileList 变化时发 change，不清的话再选
+// **同一个文件**不会触发任何事，用户看到的是"点了没反应"。
+const reset = () => { if (input) input.value = ''; };
 if (!file) {
     dioxus.send(null);
 } else {
     const reader = new FileReader();
-    reader.onload = () => dioxus.send(String(reader.result ?? ''));
-    reader.onerror = () => dioxus.send(null);
+    reader.onload = () => { const text = String(reader.result ?? ''); reset(); dioxus.send(text); };
+    reader.onerror = () => { reset(); dioxus.send(null); };
     reader.readAsText(file);
 }
 "#;
@@ -148,6 +151,10 @@ pub fn SettingsPanel(
     // "已经有一个存盘循环在跑"的标记。只读 `peek`（不订阅），所以它自己变来变去
     // 不会把 effect 再勾起来跑一次。
     let mut bg_saving = use_signal(|| false);
+    // 上一次**成功落库**的整份设置。背景自动保存拿它当底稿：只覆盖背景那五项，
+    // 其余字段保持库里那一版——否则用户改了主题还没点保存、只是拖了一下遮罩，
+    // 那些未保存的改动就被顺手存进去了。
+    let mut persisted = use_signal(|| settings.clone());
 
     // 背景的改动即时生效，不必再点一次「保存设置」：上传、选图、移出是"动作"，
     // 遮罩与轮换开关是"看着调"的旋钮，都该当场看到结果。
@@ -171,9 +178,19 @@ pub fn SettingsPanel(
                     break;
                 }
 
-                match save_settings(draft()).await {
+                // 底稿取"已落库的那一版"，只把背景五项换成本次草稿里的值。
+                let draft_now = draft();
+                let mut payload = persisted();
+                payload.background_preset = draft_now.background_preset;
+                payload.background_urls = draft_now.background_urls;
+                payload.background_url = draft_now.background_url;
+                payload.background_dim = draft_now.background_dim;
+                payload.background_random = draft_now.background_random;
+
+                match save_settings(payload.clone()).await {
                     Ok(()) => {
                         bg_saved.set(snapshot);
+                        persisted.set(payload);
                         save_error.set(None);
                         saved.set(true);
                         // 首页那份设置要跟着刷新，背景才会当场换掉
@@ -199,6 +216,9 @@ pub fn SettingsPanel(
         }
 
         let payload = draft();
+        // 手动保存：整份草稿都落库，背景的"已存版本"乃至底稿一起对齐
+        let applied = payload.clone();
+        let snapshot = BackgroundSnapshot::of(&applied);
 
         spawn(async move {
             saving.set(true);
@@ -209,6 +229,10 @@ pub fn SettingsPanel(
                 Ok(()) => {
                     saved.set(true);
                     saving.set(false);
+                    // 整份都存了：底稿与"已存背景"一起跟上，免得背景那条
+                    // 自动保存循环把这份改动又存一遍
+                    persisted.set(applied);
+                    bg_saved.set(snapshot);
                     on_settings_saved.call(());
 
                     // `<title>` / meta / favicon 是 SSR 时写进 head 的；Dioxus 的

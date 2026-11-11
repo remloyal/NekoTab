@@ -31,8 +31,12 @@ const input = document.getElementById('nekotab-wallpaper-file');
 const picked = input && input.files ? Array.from(input.files) : [];
 const files = picked.filter((file) => file.size <= MAX_BYTES);
 const oversize = picked.filter((file) => file.size > MAX_BYTES);
+// 读完清空 value：不清的话再选同一批文件不会触发 change（浏览器只在
+// FileList 变化时发），用户以为"点了没反应"。
+const reset = () => { if (input) input.value = ''; };
 
 if (!files.length) {
+    reset();
     dioxus.send({
         ok: false,
         items: [],
@@ -50,6 +54,7 @@ if (!files.length) {
             })
             .catch((e) => ({ error: String(e) }))
     )).then((results) => {
+        reset();
         dioxus.send({
             ok: results.every((one) => one.url),
             items: [],

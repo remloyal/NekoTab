@@ -164,6 +164,51 @@ pub(crate) mod server {
     static ICON_DIR: OnceLock<PathBuf> = OnceLock::new();
 
     /// 解析并创建图标目录。在 `main` 里于服务端启动时调用一次。
+    /// 回填 `bookmarks.host`。
+    ///
+    /// 迁移 013 只加了列；老数据要在这里补。为什么不在迁移里写 SQL：拆 URL 的
+    /// 口径（userinfo、端口、大小写、非法 host）和 [`host_of`] 必须完全一致，
+    /// 用 SQL 再实现一遍迟早会漂。补完之后那条 SELECT 返回 0 行，后续启动几乎
+    /// 没有开销；真正不合法的（`host_of` 给出 `None`）会一直留空，但它们本来
+    /// 也取不到图标。
+    pub async fn backfill_hosts() {
+        let pool = db::pool();
+
+        let rows: Vec<(i64, String)> = match sqlx::query_as(
+            "SELECT id, url FROM bookmarks \
+             WHERE host = '' AND (url LIKE 'http://%' OR url LIKE 'https://%')",
+        )
+        .fetch_all(pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                // 回填失败不该挡住启动：图标只是会退回"这次全表扫"的老路
+                eprintln!("[NekoTab] 回填书签 host 失败（图标仍可用，只是慢一点）: {e}");
+                return;
+            }
+        };
+
+        if rows.is_empty() {
+            return;
+        }
+
+        let mut updated = 0usize;
+        for (id, url) in rows {
+            let Some(host) = host_of(&url) else { continue };
+            if sqlx::query("UPDATE bookmarks SET host = ? WHERE id = ?")
+                .bind(host)
+                .bind(id)
+                .execute(pool)
+                .await
+                .is_ok()
+            {
+                updated += 1;
+            }
+        }
+        println!("[NekoTab] 已为 {updated} 条书签回填 host");
+    }
+
     pub fn init_icon_dir() -> std::io::Result<PathBuf> {
         let dir = std::env::var("ICON_DIR")
             .ok()
@@ -197,11 +242,16 @@ pub(crate) mod server {
         // 只服务"确实是本站已收藏的站点"。这既是正确性要求，也避免这个
         // 无鉴权接口变成任意出站探测（SSRF）的入口——要探测就得先加书签。
         // 回收站里的书签也算：还原后图标本该还在，没必要重取。
-        let urls: Vec<String> = match sqlx::query_scalar("SELECT url FROM bookmarks")
-            .fetch_all(pool)
-            .await
-        {
-            Ok(urls) => urls,
+        //
+        // 按 `host` 列走索引（迁移 013）。早先是 `SELECT url FROM bookmarks`
+        // 全表捞出来再在 Rust 里逐个比，连"图标已缓存"的请求也要扫一遍。
+        let listed: Result<Option<String>, _> =
+            sqlx::query_scalar("SELECT url FROM bookmarks WHERE host = ? LIMIT 1")
+                .bind(&host)
+                .fetch_optional(pool)
+                .await;
+        let listed = match listed {
+            Ok(url) => url,
             Err(e) => {
                 // 这里不能吞掉错误：查库失败会让"所有主机都不在书签里"，
                 // 于是所有图标一起 404，而日志里什么都不留，非常难查。
@@ -209,15 +259,7 @@ pub(crate) mod server {
                 return not_found();
             }
         };
-
-        let scheme = urls.iter().find_map(|url| {
-            if host_of(url).as_deref() == Some(host.as_str()) {
-                scheme_of(url)
-            } else {
-                None
-            }
-        });
-        let Some(scheme) = scheme else {
+        let Some(scheme) = listed.as_deref().and_then(scheme_of) else {
             return not_found();
         };
 
@@ -826,7 +868,7 @@ pub(crate) mod server {
 }
 
 #[cfg(feature = "server")]
-pub use server::{clear_cache, decode_data_uri, icon_handler, init_icon_dir, store_icon};
+pub use server::{backfill_hosts, clear_cache, decode_data_uri, icon_handler, init_icon_dir, store_icon};
 
 #[cfg(test)]
 mod tests {

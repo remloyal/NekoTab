@@ -27,10 +27,27 @@ pub fn ContextMenu(
     /// 以这条书签为起点进入批量选择
     on_batch: EventHandler<Bookmark>,
 ) -> Element {
-    // 贴边时把菜单拉回视口内，否则在右下角的卡片上点右键会看到半截菜单
+    // 贴边时把菜单拉回视口内，否则在右下角的卡片上点右键会看到半截菜单。
+    // 预留的高度按实际条目数给足（原来按 260 算，条目多时底下一项仍会被裁）。
+    const MENU_W: f64 = 200.0;
+    const MENU_H: f64 = 320.0;
+    const SUBMENU_W: f64 = 180.0;
+
     let (viewport_w, viewport_h) = crate::dom::viewport_size();
-    let left = x.min((viewport_w - 200.0).max(8.0)).max(8.0);
-    let top = y.min((viewport_h - 260.0).max(8.0)).max(8.0);
+    let left = x.min((viewport_w - MENU_W).max(8.0)).max(8.0);
+    let top = y.min((viewport_h - MENU_H).max(8.0)).max(8.0);
+
+    // 二级菜单的方向：右边放不下就往左展开；主菜单放在下半屏时往上展开
+    //（二级菜单默认从条目顶部往下长，条目在下半屏时会伸出视口底部）。
+    let flip_x = left + MENU_W + SUBMENU_W > viewport_w - 8.0;
+    let flip_y = top > viewport_h / 2.0;
+
+    let menu_class = match (flip_x, flip_y) {
+        (true, true) => "context-menu flip-x flip-y",
+        (true, false) => "context-menu flip-x",
+        (false, true) => "context-menu flip-y",
+        (false, false) => "context-menu",
+    };
 
     rsx! {
         // 透明遮罩：点击或右键任意处关闭菜单
@@ -44,7 +61,7 @@ pub fn ContextMenu(
         }
 
         ul {
-            class: "context-menu",
+            class: "{menu_class}",
             style: "left: {left}px; top: {top}px;",
 
             if let Some(card) = target {
@@ -52,7 +69,7 @@ pub fn ContextMenu(
                     li { class: "menu-item",
                         a {
                             class: "menu-link",
-                            href: "{card.url}",
+                            href: "{crate::dom::safe_href(&card.url)}",
                             target: "_blank",
                             rel: "noopener noreferrer",
                             onclick: {
@@ -127,13 +144,18 @@ pub fn ContextMenu(
                     }
                 }
 
-                li {
-                    class: "menu-item",
-                    onclick: {
-                        let selected = card.clone();
-                        move |_| on_batch.call(selected.clone())
-                    },
-                    "批量选择（从这条开始）"
+                // 批量选择只对书签有意义：组件不参与批量（移到分组 / 删除会误伤），
+                // 卡片上的点击也明确拒绝选中组件——菜单这一项得跟着收紧，
+                // 否则从这里进去就能把一张组件卡塞进选中的集合。
+                if !card.is_widget() {
+                    li {
+                        class: "menu-item",
+                        onclick: {
+                            let selected = card.clone();
+                            move |_| on_batch.call(selected.clone())
+                        },
+                        "批量选择（从这条开始）"
+                    }
                 }
 
                 li {

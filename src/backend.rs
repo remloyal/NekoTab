@@ -361,16 +361,20 @@ pub(crate) async fn insert_new_bookmark(
     }
 
     let kind = row.kind;
+    // host 单独存一列：`/icon/{host}` 要按它走索引确认"这个站点确实被收藏过"，
+    // 不然每个图标请求都得全表扫一遍书签（见迁移 013）。
+    let host = crate::favicon::host_of(&row.url).unwrap_or_default();
     let id = sqlx::query_scalar::<_, i64>(
         "INSERT INTO bookmarks \
-         (title, url, description, tags, group_id, icon, span_w, span_h, kind, config, \
-          surface, sort_order) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+         (title, url, host, description, tags, group_id, icon, span_w, span_h, kind, \
+          config, surface, sort_order) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
                  COALESCE((SELECT MIN(sort_order) FROM bookmarks), 0) - 1) \
          RETURNING id",
     )
     .bind(row.title)
     .bind(row.url)
+    .bind(&host)
     .bind(row.description)
     .bind(row.tags)
     .bind(row.group_id)
@@ -516,14 +520,16 @@ pub async fn update_bookmark(id: i64, input: NewBookmark) -> Result<(), ServerFn
     let affected = sqlx::query(
         // 网址变了就把上次的链接检查结果作废：旧地址的 404 不该挂在新地址上。
         // `CASE` 里读到的是 UPDATE 之前的 `url`，正好用来判断"改没改"。
-        "UPDATE bookmarks SET title = ?, url = ?, description = ?, tags = ?, group_id = ?, \
-         icon = ?, span_w = ?, span_h = ?, config = ?, surface = ?, \
+        // host 同理跟着 url 一起重算（图标判定按它走索引）。
+        "UPDATE bookmarks SET title = ?, url = ?, host = ?, description = ?, tags = ?, \
+         group_id = ?, icon = ?, span_w = ?, span_h = ?, config = ?, surface = ?, \
          link_status = CASE WHEN url <> ? THEN '' ELSE link_status END, \
          link_checked_at = CASE WHEN url <> ? THEN '' ELSE link_checked_at END \
          WHERE id = ?",
     )
     .bind(row.title)
     .bind(&row.url)
+    .bind(crate::favicon::host_of(&row.url).unwrap_or_default())
     .bind(row.description)
     .bind(row.tags)
     .bind(row.group_id)
@@ -1251,6 +1257,15 @@ pub async fn regenerate_api_token() -> Result<String, ServerFnError> {
 #[cfg(feature = "server")]
 const MAX_IMPORT_BYTES: usize = 8 * 1024 * 1024;
 
+/// 一次导入的条目数上限。
+///
+/// 8 MB 里能塞进二十来万条极短的书签，而导入是**一个写事务**（要么全进、
+/// 要么全不进）：事务越长，其他写者等锁越久，`busy_timeout` 15 秒之后就是
+/// `database is locked`。浏览器自己导出的书签文件通常几千条以内，两万条足够
+/// 宽裕。
+#[cfg(feature = "server")]
+const MAX_IMPORT_ITEMS: usize = 20_000;
+
 /// 批量导入。自动识别浏览器导出的书签 HTML 与本应用的 JSON 备份。
 ///
 /// 按 URL 去重（含库内已有的）；新记录追加在现有排序之后，并保持文件内顺序。
@@ -1273,6 +1288,12 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
         return Err(ServerFnError::new(
             "没解析出任何书签：请粘贴浏览器导出的书签 HTML，或本应用导出的 JSON 备份",
         ));
+    }
+    if parsed.len() > MAX_IMPORT_ITEMS {
+        return Err(ServerFnError::new(format!(
+            "一次最多导入 {MAX_IMPORT_ITEMS} 条，这个文件有 {} 条",
+            parsed.len()
+        )));
     }
 
     let pool = db::pool();
@@ -1360,11 +1381,12 @@ pub async fn import_bookmarks(text: String) -> Result<ImportReport, ServerFnErro
 
         sqlx::query(
             "INSERT INTO bookmarks \
-             (title, url, description, tags, group_id, icon, span_w, span_h, sort_order) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (title, url, host, description, tags, group_id, icon, span_w, span_h, sort_order) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(if title.is_empty() { url.clone() } else { title })
         .bind(&url)
+        .bind(crate::favicon::host_of(&url).unwrap_or_default())
         .bind(item.description.trim())
         .bind(normalize_tags(&item.tags))
         .bind(group_id)
@@ -1585,11 +1607,35 @@ pub(crate) fn link_check_client() -> &'static reqwest::Client {
     })
 }
 
+/// 同一时刻只允许一轮链接检测。
+///
+/// 一个请求内最多 [`crate::linkcheck::MAX_CONCURRENCY`] 条并发；N 个标签页 /
+/// 客户端同时点就能叠成 8N 条出站，把对方站点和自己的出口一起压垮。这不是
+/// 限流，是"这件事本来就只需要跑一轮"。
+#[cfg(feature = "server")]
+static LINK_CHECK_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 把"正在跑"的标记在离开作用域时复位（中途任何一步出错都不会卡住）。
+#[cfg(feature = "server")]
+struct CheckRunGuard;
+
+#[cfg(feature = "server")]
+impl Drop for CheckRunGuard {
+    fn drop(&mut self) {
+        LINK_CHECK_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
 /// 检查书签的链接还通不通，并把结果写回书签行。
 ///
 /// `ids` 为空表示检查全部书签（只查书签——组件没有网址）。结果分三种：
 /// 正常、坏链（状态码是错的）、不可达（连不上 / 超时）；只有坏链会被界面上
 /// 标出来并提供一键清理，不可达的那类多半是内网或要登录的站点。
+///
+/// **分批落库**，不是攒完再写：几千条、每条最多 6 秒时一轮可能跑十几分钟，
+/// 反代通常在 60 秒就先回 504 了。攒完才写的话那一整轮的结果全都丢掉；
+/// 现在每探完一批就写回，客户端断开也只是没探完，已经探到的留在库里。
 #[server]
 pub async fn check_links(ids: Vec<i64>) -> Result<Vec<LinkCheck>, ServerFnError> {
     use crate::db;
@@ -1616,10 +1662,20 @@ pub async fn check_links(ids: Vec<i64>) -> Result<Vec<LinkCheck>, ServerFnError>
         return Ok(Vec::new());
     }
 
-    let results = crate::linkcheck::probe_all(wanted).await;
+    if LINK_CHECK_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err(ServerFnError::new("正在检测中，请等这一轮跑完"));
+    }
+    let _guard = CheckRunGuard;
 
-    // 把结果写回书签行，卡片上才能显示"这条可能坏了"
-    save_link_status(db::pool(), &results).await?;
+    // 每 32 条落一次库：既不用等整轮跑完，也不至于每条都开一个事务。
+    const SAVE_EVERY: usize = 32;
+    let mut results: Vec<LinkCheck> = Vec::with_capacity(wanted.len());
+
+    for batch in wanted.chunks(SAVE_EVERY) {
+        let mut batch_results = crate::linkcheck::probe_all(batch.to_vec()).await;
+        save_link_status(db::pool(), &batch_results).await?;
+        results.append(&mut batch_results);
+    }
 
     Ok(results)
 }
@@ -1678,18 +1734,40 @@ pub async fn clear_link_status() -> Result<usize, ServerFnError> {
 /// 256 KB 上限）已经在站点图标那里有一套，直接复用。
 ///
 /// 只接受 http(s)，且先过一遍 [`crate::favicon::host_of`]——与图标、入库校验同一条
-/// 口径。单用户自部署下它和「添加书签」是同一层权限（设了 `ACCESS_PASSWORD` 就
-/// 一起要登录），所以没有额外把内网地址挡掉：给内网服务收藏书签是正常用法，
-/// 代价是服务端会去请求用户给的地址（与站点图标接口相同的取舍）。
+/// 口径。**内网地址要已经收藏过才允许取**：这条接口和 `/icon/{host}` 是同一类
+/// 出口，默认部署（不设密码）时谁都能调，不设这道闸的话拿一个内网地址进来就能
+/// 把它的 title / 描述读回去。
 #[server]
 pub async fn fetch_page_meta(url: String) -> Result<PageMeta, ServerFnError> {
+    use crate::db;
+
     let url = url.trim().to_string();
 
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(ServerFnError::new("网址需以 http:// 或 https:// 开头"));
     }
-    if crate::favicon::host_of(&url).is_none() {
+    let Some(host) = crate::favicon::host_of(&url) else {
         return Err(ServerFnError::new("网址格式不对"));
+    };
+
+    // 内网地址要"已经收藏过"才允许取。
+    //
+    // 这条接口原本的取舍是"和添加书签同一层权限"，默认部署不设密码时那句话
+    // 等于"谁都能用"：拿一个内网地址进来就能把它的 `<title>` 与描述读回去。
+    // 现在与 `/icon/{host}` 同一口径——己经在书签里说明用户确认过这个地址，
+    // 没收藏过的内网地址一律不碰。
+    //
+    // 代价：第一次收藏一个内网站点时抓不到标题（名称仍可手填，抓取本来就
+    // 不影响保存）；收藏之后再点「重新抓取」就能拿到。
+    let listed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks WHERE host = ?")
+        .bind(&host)
+        .fetch_one(db::pool())
+        .await
+        .unwrap_or(0);
+    if listed == 0 {
+        crate::netguard::ensure_allowed(&url, None)
+            .await
+            .map_err(ServerFnError::new)?;
     }
 
     let html = crate::favicon::server::fetch_html_head(&url)
@@ -2125,6 +2203,8 @@ mod tests {
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 title       TEXT NOT NULL,
                 url         TEXT NOT NULL,
+                -- 与迁移 013 一致：图标判定按它走索引
+                host        TEXT NOT NULL DEFAULT '',
                 description TEXT NOT NULL DEFAULT '',
                 tags        TEXT NOT NULL DEFAULT '',
                 group_id    INTEGER,

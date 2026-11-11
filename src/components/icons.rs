@@ -58,12 +58,70 @@ pub fn builtin_id(value: &str) -> Option<&str> {
 }
 
 /// 首字回退用的字符。
+///
+/// 取的是**一个字素簇**，不是"一个 `char`"：国旗是两个 regional indicator 拼的，
+/// 只取一个会显示成半个字母；肤色修饰符与变体选择符跟着基础字符走，拆开就是
+/// 乱码。标题里只有 emoji 的书签正好会走这条回退路径。
+///
+/// 大写只对单个字母做，而且取展开后的第一个字符（`ß` 的 to_uppercase 是 `SS`，
+/// 直接塞进格子会被裁掉）。
 pub fn initial(name: &str) -> String {
-    name.chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string()
+    let trimmed = name.trim();
+    let mut chars = trimmed.chars();
+    let Some(first) = chars.next() else {
+        return "?".to_string();
+    };
+
+    let mut out = String::new();
+    out.push(first);
+
+    // 国旗：两个 regional indicator 才算完整
+    if is_regional_indicator(first) {
+        if let Some(second) = chars.next().filter(|c| is_regional_indicator(*c)) {
+            out.push(second);
+            return out;
+        }
+    }
+
+    let mut rest = chars.peekable();
+    while let Some(ch) = rest.next() {
+        if is_variation_selector(ch) || is_skin_tone(ch) {
+            out.push(ch);
+        } else if ch == '\u{200D}' {
+            // ZWJ：把下一个字符连进来（👨‍👩‍👧 这类）
+            out.push(ch);
+            if let Some(next) = rest.next() {
+                out.push(next);
+            }
+        } else {
+            break;
+        }
+    }
+
+    let mut iter = out.chars();
+    if let (Some(single), None) = (iter.next(), iter.next()) {
+        if single.is_alphabetic() {
+            if let Some(upper) = single.to_uppercase().next() {
+                return upper.to_string();
+            }
+        }
+    }
+    out
+}
+
+/// 国旗由两个 regional indicator（U+1F1E6..=U+1F1FF）组成。
+fn is_regional_indicator(ch: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&ch)
+}
+
+/// 变体选择符（U+FE0E / U+FE0F）。
+fn is_variation_selector(ch: char) -> bool {
+    matches!(ch, '\u{FE0E}' | '\u{FE0F}')
+}
+
+/// 肤色修饰符 U+1F3FB..=U+1F3FF。
+fn is_skin_tone(ch: char) -> bool {
+    ('\u{1F3FB}'..='\u{1F3FF}').contains(&ch)
 }
 
 /// 由字符串生成稳定的色相（FNV-1a 取模 360），供"取不到图标"时的底色使用。
@@ -170,5 +228,20 @@ mod tests {
         assert_eq!(initial("开发"), "开");
         assert_eq!(initial("rust"), "R");
         assert_eq!(initial(""), "?");
+    }
+
+    /// 首字要的是**一个字素簇**，不是"一个 char"。
+    #[test]
+    fn initial_keeps_emoji_clusters_whole() {
+        // 国旗 = 两个 regional indicator
+        assert_eq!(initial("🇨🇳中国"), "🇨🇳");
+        // 肤色修饰符跟着基础字符
+        assert_eq!(initial("👍🏽"), "👍🏽");
+        // 变体选择符同理
+        assert_eq!(initial("❤️"), "❤️");
+        // 德语 ß 的大写是 SS，塞进格子会被裁：只留第一个字符
+        assert_eq!(initial("ßeta"), "S");
+        // 普通字母照旧大写
+        assert_eq!(initial("English"), "E");
     }
 }

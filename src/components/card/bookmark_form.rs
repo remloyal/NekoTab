@@ -6,26 +6,12 @@ use crate::models::{
     clamp_span, AddOutcome, Bookmark, Group, NewBookmark, CARD_SURFACES, SPAN_MAX, SPAN_PRESETS,
 };
 
-/// 抓一次页面信息并回填表单。
+/// 抓一次页面信息。
 ///
-/// 只填空位：用户已经打好的名称 / 描述不会被代取结果顶掉。`overwrite_title`
-/// 只有手动点「重新抓取」时才为真——那是明确的"以页面为准"的意图。
-async fn fill_meta(
-    link: String,
-    mut title: Signal<String>,
-    mut description: Signal<String>,
-    overwrite_title: bool,
-) -> Result<(), String> {
-    let meta = fetch_page_meta(link).await.map_err(|e| error_text(&e))?;
-
-    if !meta.title.is_empty() && (overwrite_title || title().trim().is_empty()) {
-        title.set(meta.title);
-    }
-    if !meta.description.is_empty() && description().trim().is_empty() {
-        description.set(meta.description);
-    }
-
-    Ok(())
+/// **回填不在这里做**：调用方要等请求回来、确认网址没被改过之后再写。早先
+/// 这里是"请求回来直接写"，于是先输入 A、又改成 B 时，A 的标题会落到 B 上。
+async fn fetch_meta(link: String) -> Result<crate::models::PageMeta, String> {
+    fetch_page_meta(link).await.map_err(|e| error_text(&e))
 }
 
 /// 书签表单，作为弹窗内容使用。
@@ -97,13 +83,11 @@ pub fn BookmarkForm(
     let mut meta_busy = use_signal(|| false);
     let mut meta_note = use_signal(|| Option::<String>::None);
     let mut fetched_url = use_signal(|| Option::<String>::None);
+    // 每次抓取一个递增令牌：回来时令牌变了说明用户又改了网址，这次结果作废。
+    let mut meta_token = use_signal(|| 0u32);
 
     // 失焦时自动抓（名称空着才抓），「抓取标题」按钮是手动重抓。
     let mut run_fetch = move |manual: bool| {
-        if meta_busy() {
-            return;
-        }
-
         let link = url().trim().to_string();
         if !(link.starts_with("http://") || link.starts_with("https://")) {
             if manual {
@@ -118,14 +102,32 @@ pub fn BookmarkForm(
             return;
         }
 
-        // 在进行中的标记要在 spawn 之前置位：失焦与按钮点击可能背靠背发生，
-        // 晚一步的话两次请求会同时飞出去。
+        // 不用"进行中就挡掉"：先输入 A 再改成 B 时，被挡掉的正好是 B，而 A
+        // 的结果又会回来。改成令牌——新请求作废旧请求，旧的回来直接丢掉。
+        let token = meta_token() + 1;
+        meta_token.set(token);
         meta_busy.set(true);
         meta_note.set(None);
 
         spawn(async move {
-            match fill_meta(link.clone(), title, description, manual).await {
-                Ok(()) => {
+            let result = fetch_meta(link.clone()).await;
+
+            // 网址已经改过：这次结果属于上一个地址，一个字都不能写。
+            // 也不清 busy——那是后一次请求的事。
+            if meta_token() != token {
+                return;
+            }
+
+            match result {
+                Ok(meta) => {
+                    // 只填空位：用户已经打好的不会被顶掉；只有手动重抓才是
+                    // "以页面为准"。
+                    if !meta.title.is_empty() && (manual || title().trim().is_empty()) {
+                        title.set(meta.title);
+                    }
+                    if !meta.description.is_empty() && description().trim().is_empty() {
+                        description.set(meta.description);
+                    }
                     fetched_url.set(Some(link));
                     if title().trim().is_empty() {
                         meta_note.set(Some("这个页面没给出标题，手动填一下吧".to_string()));
@@ -159,10 +161,19 @@ pub fn BookmarkForm(
 
             // 新增时名称还空着（比如在网址框里直接回车提交）：先替用户抓一次。
             // 抓到就随这次保存一起写进去；抓不到再交给下面的校验去提示。
+            // 这里不需要令牌比对：抓的是**正要保存的这个地址**，回来时立刻用于
+            // 本次提交，不存在"结果属于另一个网址"的问题。
             if !is_edit && title().trim().is_empty() {
                 let link = url().trim().to_string();
                 if link.starts_with("http://") || link.starts_with("https://") {
-                    let _ = fill_meta(link, title, description, false).await;
+                    if let Ok(meta) = fetch_meta(link).await {
+                        if !meta.title.is_empty() && title().trim().is_empty() {
+                            title.set(meta.title);
+                        }
+                        if !meta.description.is_empty() && description().trim().is_empty() {
+                            description.set(meta.description);
+                        }
+                    }
                 }
             }
 

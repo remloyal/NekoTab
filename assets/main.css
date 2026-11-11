@@ -1535,6 +1535,21 @@ body {
     display: block;
 }
 
+/* 贴边翻转：二级菜单默认从主菜单右侧展开（left:100%），主菜单被夹到右边界
+   附近时它会跑到视口外——「移到分组」「添加卡片」正好都要用它，而它们在下拉里
+   又是靠下的项。窄窗口 / 最右一列卡片上点右键就会碰到。
+   这两个类由 ContextMenu 按主菜单位置算出来挂上。 */
+.context-menu.flip-x .submenu {
+    left: auto;
+    right: 100%;
+    margin: 0 4px 0 0;
+}
+
+.context-menu.flip-y .submenu {
+    top: auto;
+    bottom: -6px;
+}
+
 /* ---------- 弹窗 ---------- */
 .modal-backdrop {
     position: fixed;

@@ -53,15 +53,19 @@ struct ToastState {
 /// 分流只做一次，下面是两条不同的路：书签照旧走关键词 → 分组 → 分页；组件直接
 /// 拼回显示列表的最前面，**不参与**这三步——组件是"少、固定、一眼要看到"的东西，
 /// 被搜索筛掉或翻到第二页都只会让版面突然缺一块。
-fn split_cards(cards: &[Bookmark]) -> (Vec<Bookmark>, Vec<Bookmark>) {
+/// 把卡片分成"组件"与"书签"两堆。
+///
+/// **按值取**（不是借用后再克隆）：这条分流在渲染路径上跑，每条书签在这里
+/// 被克隆一次的话，搜索框每敲一个字就要多克隆一整份列表。
+fn split_cards(cards: Vec<Bookmark>) -> (Vec<Bookmark>, Vec<Bookmark>) {
     let mut widgets = Vec::new();
     let mut bookmarks = Vec::new();
 
     for card in cards {
         if card.is_widget() {
-            widgets.push(card.clone());
+            widgets.push(card);
         } else {
-            bookmarks.push(card.clone());
+            bookmarks.push(card);
         }
     }
 
@@ -287,17 +291,28 @@ pub fn Home() -> Element {
         Some(Err(e)) => Some(e.to_string()),
         _ => None,
     };
-    let all_items: Vec<Bookmark> = match &snapshot {
-        Some(Ok(items)) => items.clone(),
+    // 从快照里**移**出列表，不再克隆一份：下面整条管线都靠移动来走，
+    // 一条书签在一次渲染里被克隆的次数从五六次降到一两次（见下方各处注释）。
+    let all_items: Vec<Bookmark> = match snapshot {
+        Some(Ok(items)) => items,
         _ => Vec::new(),
     };
 
     // ---- 组件 / 书签分流 ----
     // 分流在最前面做，于是下面整条"关键词 → 分组 → 分页"的管线只跑书签，
     // 组件在最后拼回显示列表的最前面（见下方 `view`）。
-    let (widgets, bookmarks) = split_cards(&all_items);
+    let (widgets, bookmarks) = split_cards(all_items);
     // 分组条数与"还没有书签"的空态提示都只看书签：有组件不等于有书签
     let total = bookmarks.len();
+
+    // 拖拽落位要用的"全量顺序"（组件在前、随后是全部书签）与组件 id 集合，
+    // 先在这里取出来——下面 `widgets` / `bookmarks` 会被整条管线**移**走。
+    let full_ids: Vec<i64> = widgets
+        .iter()
+        .chain(bookmarks.iter())
+        .map(|card| card.id)
+        .collect();
+    let widget_ids: HashSet<i64> = widgets.iter().map(|card| card.id).collect();
 
     // ---- 筛选 ----
     let known_group_ids: HashSet<i64> = groups.iter().map(|group| group.id).collect();
@@ -308,11 +323,9 @@ pub fn Home() -> Element {
         String::new()
     };
 
-    let keyword_matched: Vec<Bookmark> = bookmarks
-        .iter()
-        .filter(|item| matches_keyword(item, &keyword))
-        .cloned()
-        .collect();
+    // 关键词筛选：就地保留，不要克隆出第二份
+    let mut keyword_matched = bookmarks;
+    keyword_matched.retain(|item| matches_keyword(item, &keyword));
 
     // 标签页的条数跟着当前结果集走（和原来的行为一致）
     let counts = count_by_group(&keyword_matched, &known_group_ids);
@@ -345,17 +358,20 @@ pub fn Home() -> Element {
         matched.len().div_ceil(page_size).max(1)
     };
     let current_page = page().min(page_count - 1);
+    // 本页的书签：从 `matched` 里**移**出来。不分页时整份都是本页，直接搬走。
+    let matched_len = matched.len();
     let page_of_bookmarks: Vec<Bookmark> = if page_size == 0 {
-        matched.clone()
+        matched
     } else {
         let start = current_page * page_size;
-        let end = (start + page_size).min(matched.len());
-        matched[start..end].to_vec()
+        matched.into_iter().skip(start).take(page_size).collect()
     };
 
     // 显示列表 = 本组可见的组件（按它们自己的顺序）++ 本页书签。
     // 组件与书签的 sort_order 共用一列，但显示时按 kind 分两段，所以两边互不干扰：
     // 拖拽也只在同类之间生效（见 on_reorder），于是这一段始终是稳定的前缀。
+    // 组件只有寥寥几个（书签才是成千上万条），这里克隆一份无所谓：
+    // 「添加卡片」弹窗还要用完整的组件列表来填它的设置表单。
     let visible_widgets: Vec<Bookmark> = widgets
         .iter()
         .filter(|item| widget_visible(item, filter, &known_group_ids))
@@ -444,6 +460,22 @@ pub fn Home() -> Element {
             if crate::dom::focus_is_on_body() {
                 crate::dom::focus_element(SEARCH_INPUT_ID);
             }
+        }
+    });
+
+    // 弹窗 / 抽屉关掉之后焦点会掉到 body 上（被聚焦的那个节点已经卸载），
+    // 于是挂在根节点上的快捷键（Esc / 翻页）收不到了。这里在它们关闭时把焦点
+    // 收回页面——只在焦点确实无处可去时动手，别抢用户自己点的位置。
+    #[cfg_attr(not(feature = "web"), allow(unused_variables))]
+    let overlay_was_open = use_hook(|| std::cell::Cell::new(false));
+    use_effect(move || {
+        #[cfg(feature = "web")]
+        {
+            let open = modal() != ModalState::None || drawer_open();
+            if overlay_was_open.get() && !open && crate::dom::focus_is_on_body() {
+                crate::dom::focus_element(SEARCH_INPUT_ID);
+            }
+            overlay_was_open.set(open);
         }
     });
 
@@ -536,12 +568,8 @@ pub fn Home() -> Element {
     // 这里的"全量顺序"取的是**显示顺序**（组件在前、随后是全部书签），而不是服务端
     // 返回的原始行序：两者在首次重排之前可能不一致，用显示顺序算落位才不会出现
     // "看到的顺序"和"算出来的顺序"错位。
-    let full_ids: Vec<i64> = widgets
-        .iter()
-        .chain(bookmarks.iter())
-        .map(|card| card.id)
-        .collect();
-    let widget_ids: HashSet<i64> = widgets.iter().map(|card| card.id).collect();
+    // （`full_ids` 与 `widget_ids` 在上面的分流处就取好了——`widgets` /
+    //  `bookmarks` 随后会被整条筛选管线移走。）
     let on_reorder = move |(dragged, target): (i64, i64)| {
         if dragged == target {
             return;
@@ -712,10 +740,17 @@ pub fn Home() -> Element {
                 let key = evt.key();
                 let modifiers = evt.modifiers();
 
-                // Ctrl/Cmd + K：回到搜索框
+                // Ctrl/Cmd + K：回到搜索框。
+                //
+                // 弹窗 / 抽屉开着时不接：搜索框被遮在下面，`.focus()` 却照样
+                // 生效——焦点跑到看不见的地方之后，输入会落进搜索框，回车还会
+                // 在后台开一个搜索标签页，而弹窗毫无反应。
                 if matches!(&key, Key::Character(c) if c.eq_ignore_ascii_case("k"))
                     && (modifiers.contains(Modifiers::CONTROL) || modifiers.contains(Modifiers::META))
                 {
+                    if modal() != ModalState::None || drawer_open() {
+                        return;
+                    }
                     evt.prevent_default();
                     crate::dom::focus_element(SEARCH_INPUT_ID);
                     return;
@@ -756,8 +791,16 @@ pub fn Home() -> Element {
                 }
             },
 
-            // 空白处右键 → 背景菜单
+            // 空白处右键 → 背景菜单。
+            //
+            // 弹窗 / 抽屉开着时不接：它们都是根节点的后代，右键事件会冒泡上来，
+            // 而菜单的 z-index 比它们低——于是会留下一个看不见的菜单，关掉弹窗
+            // 的瞬间它才凭空出现，`Esc` 也要多按一次。这样打开的原生菜单也不该
+            // 被拦（输入框里的复制 / 粘贴还要用）。
             oncontextmenu: move |evt| {
+                if modal() != ModalState::None || drawer_open() {
+                    return;
+                }
                 evt.prevent_default();
                 let coords = evt.client_coordinates();
                 menu.set(Some((coords.x, coords.y, None)));
@@ -765,14 +808,26 @@ pub fn Home() -> Element {
 
             // 触屏左右滑动翻页（只认触摸，鼠标拖拽不受影响）
             onpointerdown: move |evt| {
-                if page_count > 1 && evt.pointer_type() == "touch" && !editing() {
+                // 弹窗 / 抽屉 / 批量选择态里不认手势：那时候用户是在操作那一层，
+                // 横向划一下把背后的卡片翻页没有道理。
+                if page_count > 1
+                    && evt.pointer_type() == "touch"
+                    && !editing()
+                    && !selecting()
+                    && modal() == ModalState::None
+                    && !drawer_open()
+                {
                     swipe_start.set(Some(evt.client_coordinates().x));
                 }
             },
+            // 手势被打断（浏览器接管了滚动、通知栏下拉、指针离开窗口）时清掉起点。
+            // 不清的话它会一直留着，之后任意一次 pointerup 都可能莫名翻页。
+            onpointercancel: move |_| swipe_start.set(None),
             onpointerup: move |evt| {
                 let Some(start) = swipe_start() else { return };
                 swipe_start.set(None);
-                if page_count <= 1 {
+                // 只认触摸抬手：mouse / pen 的 pointerup 不该触发翻页
+                if page_count <= 1 || evt.pointer_type() != "touch" {
                     return;
                 }
                 let dx = evt.client_coordinates().x - start;
@@ -892,7 +947,7 @@ pub fn Home() -> Element {
                     } else if loading {
                         div { class: "state state-loading", "加载中…" }
                     } else {
-                        if matched.is_empty() {
+                        if matched_len == 0 {
                             div { class: "hint",
                                 if total == 0 {
                                     "还没有书签：在空白处右键 → 添加卡片"
@@ -954,7 +1009,7 @@ pub fn Home() -> Element {
                             page: current_page,
                             page_count,
                             page_size,
-                            total: matched.len(),
+                            total: matched_len,
                             on_jump: move |target: usize| jump_page(target),
                         }
                     }
@@ -1516,7 +1571,7 @@ mod tests {
             widget(4, crate::models::KIND_CLOCK),
         ];
 
-        let (widgets, bookmarks) = split_cards(&cards);
+        let (widgets, bookmarks) = split_cards(cards.clone());
         assert_eq!(widgets.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2, 4]);
         assert_eq!(
             bookmarks.iter().map(|c| c.id).collect::<Vec<_>>(),
@@ -1532,7 +1587,7 @@ mod tests {
             widget(2, crate::models::KIND_CLOCK),
         ];
 
-        let (widgets, bookmarks) = split_cards(&cards);
+        let (widgets, bookmarks) = split_cards(cards.clone());
         assert_eq!(widgets.len() + bookmarks.len(), cards.len());
     }
 
@@ -1541,7 +1596,7 @@ mod tests {
     fn unknown_kind_is_not_treated_as_a_widget() {
         let cards = vec![widget(7, "chart")];
 
-        let (widgets, bookmarks) = split_cards(&cards);
+        let (widgets, bookmarks) = split_cards(cards.clone());
         assert!(widgets.is_empty(), "白名单外的类型不算组件");
         assert_eq!(bookmarks.len(), 1, "它退回书签那一侧");
     }
