@@ -140,9 +140,14 @@ pub fn SearchBar(
     let mut highlight = use_signal(|| Option::<usize>::None);
     // 被主动收起过（Esc / 选完一项 / 焦点离开）：在输入再次变化前不再弹出来
     let mut dismissed = use_signal(|| false);
-    // 输入框是否聚焦。首屏 autofocus 会把焦点送进来，初值先按 true 算，
-    // 否则历史面板要等用户再点一下输入框才出现。
-    let mut focused = use_signal(|| true);
+    // 输入框是否聚焦。
+    let mut focused = use_signal(|| false);
+    // 焦点是不是用户自己送上来的（点进输入框、在里面按键）。
+    //
+    // 首屏的 autofocus 与首页 effect 里的 `focus_element` 都会聚焦这个输入框，
+    // 但它们只是为了让快捷键和直接打字能用，不是用户想看历史——只按 `focused`
+    // 判断的话，刷新一下「最近搜索」就自己摊在那儿挡住卡片了。
+    let mut engaged = use_signal(|| false);
     // 历史列表的重查令牌（记录一条、清空之后 +1）
     let history_refresh = use_signal(|| 0u32);
     // 历史面板的高亮行，与联想面板的 `highlight` 分开
@@ -190,10 +195,11 @@ pub fn SearchBar(
         mode == SearchMode::Web && !dismissed() && !value.trim().is_empty() && !items.is_empty();
 
     // ---- 历史面板 ----
-    // 只在「搜网页」且输入框为空时出现：一旦开始输入，那个位置让给联想词；
-    // 筛书签模式下方网格才是主体，不弹历史。
+    // 只在「搜网页」且输入框为空、且是用户自己聚焦进来时出现：一旦开始输入，
+    // 那个位置让给联想词；筛书签模式下方网格才是主体，不弹历史。
     let show_history = mode == SearchMode::Web
         && focused()
+        && engaged()
         && !dismissed()
         && value.trim().is_empty()
         && !history_items.is_empty();
@@ -359,6 +365,8 @@ pub fn SearchBar(
                     value: "{value}",
                     // 点回输入框时让面板重新出现（比如刚用 Esc 收起过）
                     onclick: move |_| dismissed.set(false),
+                    // 用户亲自点了输入框：历史面板这下可以出现了
+                    onpointerdown: move |_| engaged.set(true),
                     // 页面的背景右键菜单会 `prevent_default` 掉原生菜单，输入框里
                     // 就再也用不了「粘贴 / 复制」。这里拦住冒泡，让浏览器自己的
                     // 右键菜单照常出现（只断链，不调 prevent_default）。
@@ -391,67 +399,71 @@ pub fn SearchBar(
                         let pick = pick.clone();
                         let history_items = history_items.clone();
                         let replay = replay.clone();
-                        move |evt| match evt.key() {
-                            // 上下键在联想里移动高亮；没有联想时不要拦，
-                            // 让方向键继续去做翻页（根节点的快捷键）
-                            Key::ArrowDown if show_panel => {
-                                evt.prevent_default();
-                                let next = match highlight() {
-                                    Some(index) => (index + 1).min(items.len() - 1),
-                                    None => 0,
-                                };
-                                highlight.set(Some(next));
-                            }
-                            Key::ArrowUp if show_panel => {
-                                evt.prevent_default();
-                                highlight.set(Some(match highlight() {
-                                    Some(0) | None => 0,
-                                    Some(index) => index - 1,
-                                }));
-                            }
-                            Key::Enter if show_panel => {
-                                if let Some(index) = highlight() {
-                                    // 拦掉表单提交，改用高亮那一项
+                        move |evt| {
+                            // 用户已经在输入框里动手了（比如刷新后直接打字）：算主动聚焦
+                            engaged.set(true);
+                            match evt.key() {
+                                // 上下键在联想里移动高亮；没有联想时不要拦，
+                                // 让方向键继续去做翻页（根节点的快捷键）
+                                Key::ArrowDown if show_panel => {
                                     evt.prevent_default();
-                                    pick(items[index].clone());
+                                    let next = match highlight() {
+                                        Some(index) => (index + 1).min(items.len() - 1),
+                                        None => 0,
+                                    };
+                                    highlight.set(Some(next));
                                 }
-                            }
-                            Key::Escape if show_panel => {
-                                // 只收面板，不要让根节点的 Esc 再关一层弹窗
-                                evt.prevent_default();
-                                evt.stop_propagation();
-                                dismiss();
-                            }
-                            // 历史面板同样支持上下键与回车（空输入时才出现）
-                            Key::ArrowDown if show_history => {
-                                evt.prevent_default();
-                                let next = match history_highlight() {
-                                    Some(index) => (index + 1).min(history_items.len() - 1),
-                                    None => 0,
-                                };
-                                history_highlight.set(Some(next));
-                            }
-                            Key::ArrowUp if show_history => {
-                                evt.prevent_default();
-                                history_highlight.set(Some(match history_highlight() {
-                                    Some(0) | None => 0,
-                                    Some(index) => index - 1,
-                                }));
-                            }
-                            Key::Enter if show_history => {
-                                if let Some(index) = history_highlight() {
-                                    if let Some(item) = history_items.get(index) {
+                                Key::ArrowUp if show_panel => {
+                                    evt.prevent_default();
+                                    highlight.set(Some(match highlight() {
+                                        Some(0) | None => 0,
+                                        Some(index) => index - 1,
+                                    }));
+                                }
+                                Key::Enter if show_panel => {
+                                    if let Some(index) = highlight() {
+                                        // 拦掉表单提交，改用高亮那一项
                                         evt.prevent_default();
-                                        replay(item.clone());
+                                        pick(items[index].clone());
                                     }
                                 }
+                                Key::Escape if show_panel => {
+                                    // 只收面板，不要让根节点的 Esc 再关一层弹窗
+                                    evt.prevent_default();
+                                    evt.stop_propagation();
+                                    dismiss();
+                                }
+                                // 历史面板同样支持上下键与回车（空输入时才出现）
+                                Key::ArrowDown if show_history => {
+                                    evt.prevent_default();
+                                    let next = match history_highlight() {
+                                        Some(index) => (index + 1).min(history_items.len() - 1),
+                                        None => 0,
+                                    };
+                                    history_highlight.set(Some(next));
+                                }
+                                Key::ArrowUp if show_history => {
+                                    evt.prevent_default();
+                                    history_highlight.set(Some(match history_highlight() {
+                                        Some(0) | None => 0,
+                                        Some(index) => index - 1,
+                                    }));
+                                }
+                                Key::Enter if show_history => {
+                                    if let Some(index) = history_highlight() {
+                                        if let Some(item) = history_items.get(index) {
+                                            evt.prevent_default();
+                                            replay(item.clone());
+                                        }
+                                    }
+                                }
+                                Key::Escape if show_history => {
+                                    evt.prevent_default();
+                                    evt.stop_propagation();
+                                    dismiss();
+                                }
+                                _ => {}
                             }
-                            Key::Escape if show_history => {
-                                evt.prevent_default();
-                                evt.stop_propagation();
-                                dismiss();
-                            }
-                            _ => {}
                         }
                     },
                     // 焦点离开就收起。面板里那些行在 mousedown 时拦了默认行为，
