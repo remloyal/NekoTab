@@ -495,6 +495,15 @@ body {
     opacity: 0.42;
 }
 
+/* Chrome / Safari 会给 type="search" 自带一个清空叉（蓝的那个）。它只把值清成空，
+   不重置联想词、高亮和面板状态，还会跟右侧自己的 ✕ 并排成两个。藏掉原生的，
+   只留 .search-go —— 它会顺带收面板、把焦点守住。 */
+.search::-webkit-search-cancel-button,
+.search::-webkit-search-decoration {
+    -webkit-appearance: none;
+    appearance: none;
+}
+
 /* ---------- 搜索联想面板 ---------- */
 /* 吊在整条搜索框下面：当前引擎给的联想词，点一下/回车即用它去搜。 */
 .suggest-panel {
