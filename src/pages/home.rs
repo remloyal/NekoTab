@@ -207,6 +207,11 @@ pub fn Home() -> Element {
     // 触发 suspend，Suspense 边界闪一下「加载中」。
     let initial = use_server_future(move || async move { list_bookmarks(String::new()).await })?;
     let initial_settings = use_server_future(move || async move { get_settings().await })?;
+    // 分组与引擎也走 server future：它们只有几行，但用 use_resource 时 SSR 不会等，
+    // 首屏先渲染出只有「全部」的标签栏，要等 hydrate 后再发一次请求才补上分组。
+    // 直出之后首屏 HTML 就是完整的，hydrate 直接复用序列化好的值。
+    let initial_groups = use_server_future(move || async move { list_groups().await })?;
+    let initial_engines = use_server_future(move || async move { list_engines().await })?;
 
     let mut refresh = use_signal(|| 0u32);
     let mut settings_refresh = use_signal(|| 0u32);
@@ -233,12 +238,22 @@ pub fn Home() -> Element {
     });
 
     let groups_res = use_resource(move || async move {
-        let _ = groups_refresh();
+        // 与书签同一套：首次渲染直接用服务端带来的数据；编辑分组后 refresh 不再为 0，
+        // 才重新请求。分组只是标签栏，失败时回退为空列表即可（还留着「全部」）。
+        if groups_refresh() == 0 {
+            if let Some(v) = (&*initial_groups.peek()).clone() {
+                return v;
+            }
+        }
         list_groups().await
     });
 
     let engines_res = use_resource(move || async move {
-        let _ = engines_refresh();
+        if engines_refresh() == 0 {
+            if let Some(v) = (&*initial_engines.peek()).clone() {
+                return v;
+            }
+        }
         list_engines().await
     });
 
@@ -272,19 +287,31 @@ pub fn Home() -> Element {
     };
     let groups: Vec<Group> = match (&*groups_res.read()).clone() {
         Some(Ok(list)) => list,
-        _ => Vec::new(),
+        Some(Err(_)) => Vec::new(),
+        // 资源还没跑完（SSR 恢复渲染时常见）就直接用直出的那份：
+        // 否则标签栏会先渲染出「全部 + 未分组」，等下一次渲染才补上分组。
+        None => match (&*initial_groups.read()).clone() {
+            Some(Ok(list)) => list,
+            _ => Vec::new(),
+        },
     };
     let engines = match (&*engines_res.read()).clone() {
         Some(Ok(list)) => list,
-        _ => Vec::new(),
+        Some(Err(_)) => Vec::new(),
+        None => match (&*initial_engines.read()).clone() {
+            Some(Ok(list)) => list,
+            _ => Vec::new(),
+        },
     };
     // 搜索框先摆上内置三家：真实列表要等一次请求，这期间左侧引擎位和回车都是空的。
     // 只在「请求还没回来」时用占位；设置面板仍拿真实 `engines`，不能拿占位行去编辑/删除。
-    let search_engines = if engines_res.read().is_none() {
-        crate::engine::default_engines()
-    } else {
-        engines.clone()
-    };
+    // 已经有直出的数据时不算「没回来」，否则会把真实引擎暂时盖成内置三家。
+    let search_engines =
+        if engines.is_empty() && engines_res.read().is_none() && initial_engines.peek().is_none() {
+            crate::engine::default_engines()
+        } else {
+            engines.clone()
+        };
 
     let loading = snapshot.is_none();
     let error: Option<String> = match &snapshot {
